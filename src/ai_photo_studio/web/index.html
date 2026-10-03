@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>AI 修图工作台</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <div class="eyebrow">AI PHOTO STUDIO</div>
+        <h1 id="projectName">AI 修图工作台</h1>
+        <p>查看完整画面，逐版留下修改意见，选择交付版本。</p>
+      </div>
+      <div class="stats" id="stats">正在载入照片…</div>
+    </header>
+    <main>
+      <div class="album-tools">
+        <label for="albumSelect">相册目录</label
+        ><select id="albumSelect" aria-label="选择相册目录"></select
+        ><button id="rescanAlbums" type="button">刷新目录</button
+        ><button id="openSettings" type="button" disabled>Codex 设置</button
+        ><span id="codexHint" class="quiet"
+          >提交修改会启动本机 Codex；模型服务按你的 Codex
+          配置运行，并非离线修图。</span
+        >
+      </div>
+      <div class="gallery-tools">
+        <nav class="filters" id="filters" aria-label="照片分类">
+          <button data-category="全部" aria-pressed="true">全部</button
+          ><button data-category="人物" aria-pressed="false">人物</button
+          ><button data-category="风景" aria-pressed="false">风景</button
+          ><button data-category="动态" aria-pressed="false">动态</button>
+        </nav>
+        <button id="commentFilter" aria-pressed="false">有评论</button
+        ><button id="pendingFilter" aria-pressed="false">待审阅</button
+        ><button class="export-button" data-open-export disabled>
+          导出已选 · 0</button
+        ><input
+          class="search"
+          id="search"
+          type="search"
+          aria-label="搜索照片编号或场景"
+          placeholder="搜索编号或场景"
+        />
+      </div>
+      <div class="grid" id="grid" tabindex="0" aria-label="照片列表"></div>
+      <p id="loadError" class="error" role="alert"></p>
+    </main>
+    <footer>
+      <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> 移动选片　<kbd
+        >Enter</kbd
+      >
+      打开对比　<kbd>Esc</kbd> 返回相册
+    </footer>
+    <dialog id="viewer" aria-label="照片前后对比与修改评论">
+      <div class="review-layout">
+        <div class="review-top">
+          <button id="closeViewer" aria-label="返回相册">← 相册</button>
+          <div class="review-heading">
+            <strong id="photoTitle"></strong><small id="photoMeta"></small>
+          </div>
+          <div class="top-spacer"></div>
+          <button class="export-button" data-open-export disabled>
+            导出已选 · 0
+          </button>
+          <div class="review-nav">
+            <button id="prev" aria-label="上一张">‹</button
+            ><span id="position"></span
+            ><button id="next" aria-label="下一张">›</button>
+          </div>
+        </div>
+        <section class="work-area" aria-label="对比预览">
+          <div class="view-tools">
+            <label for="versionSelect">查看版本</label
+            ><select id="versionSelect" aria-label="查看版本"></select
+            ><button id="tripleMode" aria-pressed="true">三栏对比</button
+            ><button id="compareMode" aria-pressed="false">滑动对比</button
+            ><button id="originalMode" aria-pressed="false">原始构图</button
+            ><button id="zoom" aria-pressed="false">放大 2×</button
+            ><button id="mark" aria-pressed="false">＋ 标记修改位置</button
+            ><a
+              id="fullSize"
+              target="_blank"
+              rel="noopener"
+              style="font-size: 12px; margin-left: 4px"
+              >全尺寸 ↗</a
+            ><span class="source-note" id="beforeNote"></span>
+          </div>
+          <div class="viewport" id="viewport">
+            <div class="three-view" id="threeView">
+              <figure class="version-panel">
+                <figcaption>完整原图</figcaption>
+                <div class="version-media">
+                  <img
+                    id="fullBeforeImage"
+                    alt="完整原图，保留全部画面"
+                    draggable="false"
+                  />
+                </div>
+                <p class="version-note" id="originalNote"></p>
+              </figure>
+              <figure class="version-panel">
+                <figcaption>
+                  <span id="previousLabel">对比版本</span
+                  ><small id="previousDimensions"></small>
+                </figcaption>
+                <div class="version-media" id="previousMedia">
+                  <img
+                    id="previousImage"
+                    alt="对比版本完整画面"
+                    draggable="false"
+                  />
+                </div>
+              </figure>
+              <figure class="version-panel">
+                <figcaption>
+                  <span id="newLabel">当前版本</span
+                  ><small id="newDimensions"></small>
+                </figcaption>
+                <div class="version-media" id="newMedia">
+                  <img
+                    id="newImage"
+                    alt="当前版本完整画面"
+                    draggable="false"
+                    hidden
+                  />
+                  <p id="newPending" role="status">处理中</p>
+                </div>
+              </figure>
+            </div>
+            <div id="picture" hidden class="picture-frame">
+              <img id="afterImage" alt="修后成片" draggable="false" />
+              <div class="before-layer" id="beforeLayer">
+                <img
+                  id="beforeImage"
+                  alt="修前完整原片，未裁切"
+                  draggable="false"
+                />
+              </div>
+              <div class="divider" id="divider"></div>
+              <span class="picture-label before-label" id="beforeLabel"
+                >修前</span
+              ><span class="picture-label after-label" id="afterLabel"
+                >修后</span
+              >
+              <div id="pin" class="pin" hidden></div>
+            </div>
+            <div class="original-frame" id="originalFrame" hidden>
+              <img id="originalImage" alt="原始构图" />
+            </div>
+            <video
+              class="video-view"
+              id="video"
+              controls
+              preload="metadata"
+              hidden
+            ></video>
+          </div>
+          <div class="compare-controls" id="compareControls">
+            <span id="splitAfterLabel" hidden>当前版本</span
+            ><input
+              id="split"
+              type="range"
+              min="0"
+              max="100"
+              value="50"
+              aria-label="完整原图显示比例"
+              hidden
+            /><span id="splitBeforeLabel" hidden>对比版本</span
+            ><span id="splitHint">拖动画面或滑杆</span
+            ><select id="sourceSelect" aria-label="选择对比版本"></select>
+          </div>
+        </section>
+        <aside class="comment-panel">
+          <div class="panel-section">
+            <h2>选定交付版本</h2>
+            <p>选择当前查看的版本，或取消选择。</p>
+            <div
+              id="selectionChoices"
+              class="selection-choices"
+              aria-label="选择这张照片的交付版本"
+            ></div>
+            <div
+              id="selectionStatus"
+              class="selection-status"
+              role="status"
+              aria-live="polite"
+            ></div>
+          </div>
+          <div class="panel-section">
+            <h2 id="commentFormTitle">这版想怎么改？</h2>
+            <p>可先标记画面位置，再写具体意见。</p>
+            <form id="commentForm">
+              <textarea
+                id="commentText"
+                maxlength="5000"
+                aria-label="修改意见"
+                placeholder="例如：脸部再亮一点；保留现在的肤色。"
+                required
+              ></textarea>
+              <div class="location-row" id="locationRow" hidden>
+                <span id="locationText"></span
+                ><button type="button" id="clearPoint">清除标记</button>
+              </div>
+              <div class="comment-actions">
+                <button class="primary" type="submit" id="submitComment">
+                  保存并提交修改</button
+                ><button type="button" id="saveComment">仅保存评论</button
+                ><button type="button" id="acceptVersion" hidden>
+                  通过当前版本
+                </button>
+              </div>
+              <div id="formStatus" role="status" aria-live="polite"></div>
+              <div
+                class="run-status"
+                id="runStatus"
+                role="status"
+                aria-live="polite"
+              ></div>
+            </form>
+          </div>
+          <div class="comment-list">
+            <h2 id="commentHeading">本版评论</h2>
+            <div id="comments"></div>
+          </div>
+          <details class="source-details">
+            <summary>原片与处理记录</summary>
+            <div id="sources"></div>
+            <div id="processing"></div>
+          </details>
+        </aside>
+      </div>
+    </dialog>
+    <dialog id="exportDialog" class="export-dialog" aria-label="导出已选照片">
+      <form id="exportForm">
+        <h2>导出已选照片</h2>
+        <p id="exportCount"></p>
+        <label for="exportDirectory">导出父目录</label
+        ><input
+          id="exportDirectory"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          aria-describedby="exportHint"
+        />
+        <p id="exportHint">会在这个父目录中创建导出文件夹，并附选择清单。</p>
+        <div
+          id="exportResult"
+          class="export-result"
+          role="status"
+          aria-live="polite"
+        ></div>
+        <div class="export-actions">
+          <button type="button" id="closeExport">关闭</button
+          ><button class="primary" type="submit" id="submitExport">
+            开始导出
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="settingsDialog" class="settings-dialog" aria-label="Codex 设置">
+      <form id="settingsForm">
+        <h2>本相册的 Codex 设置</h2>
+        <p class="quiet">
+          留空时使用本机 Codex 默认配置。可用推理强度取决于模型。
+        </p>
+        <label for="modelInput">模型 ID</label
+        ><input
+          id="modelInput"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="留空使用默认模型"
+        /><label for="effortSelect">推理强度</label
+        ><select id="effortSelect">
+          <option value="">使用默认</option>
+          <option value="none">none</option>
+          <option value="minimal">minimal</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+          <option value="ultra">ultra</option>
+        </select>
+        <div
+          id="settingsResult"
+          class="export-result"
+          role="status"
+          aria-live="polite"
+        ></div>
+        <div class="export-actions">
+          <button type="button" id="closeSettings">关闭</button
+          ><button class="primary" type="submit" id="saveSettings">
+            保存设置
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <div class="toast" id="toast" role="status" hidden></div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

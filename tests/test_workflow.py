@@ -8,8 +8,8 @@ import unittest
 
 from PIL import Image
 
-from executor import Runner
-from library import Library
+from ai_photo_studio.executor import Runner
+from ai_photo_studio.library import Library
 
 
 class WorkflowTest(unittest.TestCase):

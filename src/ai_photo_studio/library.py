@@ -7,7 +7,7 @@ import os
 import threading
 from pathlib import Path
 
-from store import Store, VIDEO_SUFFIXES, init_batch
+from .store import Store, VIDEO_SUFFIXES, init_batch
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".jpe", ".mpo", ".png", ".tif", ".tiff"}

@@ -147,7 +147,7 @@ class Runner:
                    "reply": None, "error": None}
             self._save(run)
             worker = threading.Thread(target=self._execute, args=(work, run), daemon=True,
-                                      name=f"photo-review-{run['jobId']}")
+                                      name=f"ai-photo-studio-{run['jobId']}")
             self._threads[run["jobId"]] = worker
             worker.start()
             return dict(run)
@@ -162,7 +162,7 @@ class Runner:
                 "如果无法可靠完成，返回 needs_input 或 failed，并在 reply 用中文说明。"
                 "只输出符合给定 JSON schema 的结果。修订时 candidatePath 必须指向当前工作目录内的真实图像文件，"
                 "label、summary、reply 均用中文；未修订时 candidatePath 与 cropFraction 填 null。"
-                "不要执行 review.py 的 publish、select、accept 或 comments reply；本程序会在校验后登记新版本，交由用户审阅。\n\n"
+                "不要执行 ai-photo-studio 的 publish、select、accept 或 comments reply；本程序会在校验后登记新版本，交由用户审阅。\n\n"
                 f"任务材料：{json.dumps(work, ensure_ascii=False, indent=2)}\n\n"
                 f"本次要处理的意见：{json.dumps(comments, ensure_ascii=False, indent=2)}\n")
 

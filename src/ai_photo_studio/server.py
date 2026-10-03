@@ -16,9 +16,9 @@ import webbrowser
 
 from PIL import Image, ImageOps
 
-from store import Store, _hash
-from library import Library
-from executor import Runner
+from .store import Store, _hash
+from .library import Library
+from .executor import Runner
 
 CODE = Path(__file__).resolve().parent
 
@@ -162,7 +162,9 @@ def make_server(batch_path=None, port=0, library_path=None):
             path = unquote(urlsplit(self.path).path)
             try:
                 if path == '/':
-                    return self.file_response(CODE / 'review.html')
+                    return self.file_response(CODE / 'web' / 'index.html')
+                if path in ('/assets/app.js', '/assets/styles.css'):
+                    return self.file_response(CODE / 'web' / path.rsplit('/', 1)[-1])
                 if path == '/api/albums':
                     return self.json_response({'albums': albums(), 'token': token})
                 query = parse_qs(urlsplit(self.path).query)

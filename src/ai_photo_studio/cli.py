@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JSON command line interface for a local photo review batch."""
+"""JSON command line interface for local AI photo editing and review."""
 
 import argparse
 import json
@@ -7,7 +7,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from store import Store, init_batch
+from .store import Store, init_batch
 
 
 def _value(text):
@@ -18,7 +18,7 @@ def _value(text):
 
 
 def _parser():
-    parser = argparse.ArgumentParser(description="Local photo review; all results are JSON. IDs and versions are immutable.")
+    parser = argparse.ArgumentParser(prog="ai-photo-studio", description="Local AI photo editing and versioned review; all results are JSON.")
     parser.add_argument("--batch", help="Batch directory (also accepted after a command)")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -112,11 +112,11 @@ def main(argv=None):
     if args.command in ("serve", "albums") and args.library:
         if batch:
             parser.error("Use either --batch or --library")
-        from library import Library
+        from .library import Library
         if args.command == "albums":
             result = Library(args.library).albums()
         else:
-            import server
+            from . import server
             result = server.serve(None, library_path=args.library, port=args.port, open_browser=args.open_browser)
     elif not batch:
         parser.error("--batch is required (or give a path to init)")
@@ -152,7 +152,7 @@ def main(argv=None):
         elif args.command == "export":
             result = store.export(args.directory)
         elif args.command == "serve":
-            import server
+            from . import server
             result = server.serve(batch, port=args.port, open_browser=args.open_browser)
         else:
             parser.error("Unknown command")
@@ -161,9 +161,13 @@ def main(argv=None):
     return 0
 
 
-if __name__ == "__main__":
+def entrypoint():
     try:
         sys.exit(main())
     except (ValueError, FileNotFoundError, FileExistsError, PermissionError, OSError, sqlite3.Error) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    entrypoint()

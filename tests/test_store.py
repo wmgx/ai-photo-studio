@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from store import Store, init_batch
+from ai_photo_studio.store import Store, init_batch
 
 
 class StoreTest(unittest.TestCase):
