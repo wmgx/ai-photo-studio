@@ -47,7 +47,7 @@ pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(jso
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             result = next(r for r in self.runner.runs() if r['jobId'] == run['jobId'])
-            if result['status'] != 'running':
+            if result['status'] not in ('queued', 'running'):
                 return result
             time.sleep(0.02)
         self.fail('Fake Codex did not finish')
@@ -55,9 +55,17 @@ pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(jso
     def test_album_edit_preserves_versions_and_model_settings(self):
         self.assertEqual(len(self.library.open(self.album_id).catalog()), 1)
         self.assertEqual(len(self.photo['sources']), 2)
-        self.runner.configure({'model':'test-model','reasoning_effort':'high','albumId':self.album_id})
+        self.runner.configure({'model':'test-model','reasoning_effort':'high','albumId':self.album_id,
+                               'requirements':'秋景暖金色，保留自然肤色'})
+        self.runner.configure({'reasoning_effort':'high'})
+        self.assertEqual(self.runner.settings()['requirements'], '秋景暖金色，保留自然肤色')
         run = self.execute('调整明暗')
         self.assertEqual(run['status'], 'ready', run)
+        self.runner.configure({'requirements':'柔和低饱和度'})
+        work = json.loads((Path(run['workDir']) / 'inputs.json').read_text())
+        self.assertEqual(work['preferences']['global_requirements'], '秋景暖金色，保留自然肤色')
+        self.assertIn('秋景暖金色，保留自然肤色', (Path(run['workDir']) / 'prompt.txt').read_text())
+        self.assertEqual(self.store.catalog()[0]['versions'][-1]['summary'], '合成验证')
         self.assertEqual(self.source.read_bytes(), self.original)
         photo = self.store.catalog()[0]
         self.assertEqual(len(photo['versions']), 2)
@@ -70,6 +78,33 @@ pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(jso
         self.store.select(photo['id'], self.photo['currentVersionId'])
         output = self.store.export()
         self.assertEqual(next(Path(output['directory']).rglob('*.jpg')).read_bytes(), self.original)
+
+
+    def test_album_requirements_queue_all_images(self):
+        extra = self.album / 'second.jpg'
+        Image.new('RGB', (24, 16), 'blue').save(extra)
+        self.library.open(self.album_id)
+        self.runner.configure({'requirements': '统一秋景暖色，文字不变'})
+        # Hold the worker until the second request has checked duplicate jobs.
+        with self.runner._lock:
+            result = self.runner.start_all()
+            duplicate = self.runner.start_all()
+            self.runner.configure({'requirements': '下一批的新要求'})
+        self.assertEqual(len(result['started']), 2)
+        self.assertEqual(len(duplicate['started']), 0)
+        self.assertEqual(len(duplicate['skipped']), 2)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            runs = self.runner.runs()
+            if all(r['status'] not in ('queued', 'running') for r in runs):
+                break
+            time.sleep(0.02)
+        self.assertEqual([r['status'] for r in runs], ['ready', 'ready'])
+        for run in runs:
+            work = json.loads((Path(run['workDir']) / 'inputs.json').read_text())
+            self.assertEqual(work['preferences']['global_requirements'], '统一秋景暖色，文字不变')
+        self.assertTrue(all(len(p['versions']) == 2 for p in self.store.catalog()))
+        self.assertEqual(self.source.read_bytes(), self.original)
 
     def test_outside_candidate_is_rejected(self):
         run = self.execute('越界候选')

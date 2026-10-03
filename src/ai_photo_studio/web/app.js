@@ -6,7 +6,7 @@ let items = [],
   project = { name: "AI 修图工作台", root: "" },
   albums = [],
   albumId = "",
-  codex = { model: "", reasoning_effort: "" },
+  codex = { model: "", reasoning_effort: "", requirements: "" },
   runs = [],
   albumGeneration = 0;
 let category = "全部",
@@ -16,6 +16,15 @@ let category = "全部",
   current = null,
   activeVersionId = null,
   compareVersionId = null;
+const revisionCountKey = "ai-photo-studio:latest-revision-count";
+let requestedRevisionCount = 2,
+  visibleRevisionIds = [],
+  comparisonCustomized = false;
+try {
+  const stored = Number(localStorage.getItem(revisionCountKey));
+  if (Number.isSafeInteger(stored) && stored > 0)
+    requestedRevisionCount = stored;
+} catch {}
 let token = "",
   mode = "triple",
   zoomed = false,
@@ -113,7 +122,7 @@ function mediaUrl(v, kind = "preview") {
 }
 function setPreview(id, v) {
   const img = $(id);
-  if (active()?.mediaType === "video" || v?.mediaType === "video")
+  if (v?.mediaType === "video")
     img.removeAttribute("src");
   else img.src = mediaUrl(v);
 }
@@ -288,6 +297,114 @@ function defaultCompare(p, v) {
     p.versions.find((x) => x.id !== v.id)
   );
 }
+function revisions(p) {
+  return p.versions.filter((item) => item.kind !== "original");
+}
+function changeDescription(v) {
+  if (v.kind === "original") return "原始照片，未修改";
+  return v.summary?.trim() || "未记录修改说明";
+}
+function shownRevisions() {
+  const all = revisions(current),
+    count = Math.min(requestedRevisionCount, all.length),
+    allowed = new Set(all.map((item) => item.id));
+  if (!comparisonCustomized) {
+    visibleRevisionIds = count ? all.slice(-count).map((item) => item.id) : [];
+  } else {
+    visibleRevisionIds = visibleRevisionIds.filter((id) => allowed.has(id));
+    for (const item of all.slice().reverse()) {
+      if (visibleRevisionIds.length >= count) break;
+      if (!visibleRevisionIds.includes(item.id))
+        visibleRevisionIds.unshift(item.id);
+    }
+    visibleRevisionIds = visibleRevisionIds.slice(-count);
+  }
+  return visibleRevisionIds.map((id) => version(current, id)).filter(Boolean);
+}
+function showActiveInComparison() {
+  const v = active();
+  if (!v || v.kind === "original" || visibleRevisionIds.includes(v.id))
+    return;
+  if (visibleRevisionIds.length) {
+    visibleRevisionIds[0] = v.id;
+    visibleRevisionIds.sort(
+      (left, right) =>
+        current.versions.findIndex((item) => item.id === left) -
+        current.versions.findIndex((item) => item.id === right),
+    );
+    comparisonCustomized = true;
+  }
+}
+function renderComparisonPanels() {
+  const base = original(current),
+    shown = shownRevisions();
+  const displayed = [
+      base,
+      ...visibleRevisionIds.map((id) => version(current, id)),
+    ].filter(Boolean),
+    container = $("threeView");
+  container.style.setProperty("--panel-count", displayed.length);
+  container.style.minWidth =
+    `${displayed.length * 280 + Math.max(0, displayed.length - 1) * 14 + 32}px`;
+  container.replaceChildren();
+  $("revisionCount").value = String(requestedRevisionCount);
+  $("revisionCountHint").textContent =
+    `原图 + ${shown.length}/${requestedRevisionCount} 张修订` +
+    (active()?.kind !== "original" &&
+    !visibleRevisionIds.includes(activeVersionId)
+      ? ` · 评论版本：${label(active())}`
+      : "");
+  for (let index = 0; index < displayed.length; index++) {
+    const item = displayed[index],
+      panel = el("figure", "version-panel"),
+      caption = el("figcaption"),
+      media = el("div", "version-media"),
+      note = el("p", "version-note", changeDescription(item));
+    panel.dataset.versionId = item.id;
+    panel.classList.toggle("active", item.id === activeVersionId);
+    caption.append(el("span", "version-title", label(item)));
+    if (item.id === activeVersionId)
+      caption.append(el("span", "active-badge", "当前评论版本"));
+    caption.append(el("small", null, dimensions(item)));
+    if (item.kind !== "original") {
+      const choice = el("select", "panel-version-select");
+      choice.setAttribute("aria-label", `第 ${index + 1} 栏显示的修订版本`);
+      for (const candidate of revisions(current)) {
+        const option = el("option", null, label(candidate));
+        option.value = candidate.id;
+        choice.append(option);
+      }
+      choice.value = item.id;
+      choice.onchange = () => {
+        const next = choice.value,
+          slot = visibleRevisionIds.indexOf(item.id),
+          other = visibleRevisionIds.indexOf(next);
+        if (other >= 0) visibleRevisionIds[other] = item.id;
+        visibleRevisionIds[slot] = next;
+        comparisonCustomized = true;
+        renderComparisonPanels();
+      };
+      caption.append(choice);
+    }
+    if (item.mediaType === "video") {
+      media.append(el("p", null, "动态素材，请切换到此版本播放"));
+    } else {
+      const img = el("img");
+      img.src = mediaUrl(item);
+      img.alt = `${label(item)}完整画面`;
+      img.draggable = false;
+      media.append(img);
+    }
+    if (item.id !== activeVersionId) {
+      const activate = el("button", "panel-activate", "在这版留意见");
+      activate.type = "button";
+      activate.onclick = () => setActiveVersion(item.id);
+      caption.append(activate);
+    }
+    panel.append(caption, media, note);
+    container.append(panel);
+  }
+}
 function populateVersions() {
   const v = active(),
     base = original(current),
@@ -318,47 +435,19 @@ function populateVersions() {
     compareVersionId = defaultCompare(current, v)?.id || null;
   if (compareVersionId) compare.value = compareVersionId;
   compare.hidden =
-    !compare.options.length || v.mediaType === "video" || mode === "original";
-  setPreview("fullBeforeImage", base);
-  $("fullBeforeImage").alt = label(base) + "完整画面";
+    !compare.options.length || v.mediaType === "video" || mode !== "compare";
   setPreview("originalImage", base);
-  $("originalNote").textContent = dimensions(base);
-  $("previousMedia").parentElement.hidden =
-    !compareVersionId ||
-    compareVersionId === base.id ||
-    compareVersionId === activeVersionId;
-  $("previousLabel").textContent = label(version(current, compareVersionId));
-  $("previousDimensions").textContent = dimensions(
-    version(current, compareVersionId),
-  );
-  if (compareVersionId)
-    setPreview("previousImage", version(current, compareVersionId));
-  else $("previousImage").removeAttribute("src");
-  $("newMedia").parentElement.hidden = v.id === base.id;
-  $("newLabel").textContent = label(v);
-  $("newDimensions").textContent = dimensions(v);
-  setPreview("newImage", v);
-  $("newImage").hidden = false;
-  $("newPending").hidden = true;
-  const panelCount =
-    1 +
-    Number(!$("previousMedia").parentElement.hidden) +
-    Number(!$("newMedia").parentElement.hidden);
-  $("threeView").classList.toggle("two", panelCount === 2);
-  $("threeView").classList.toggle("one", panelCount === 1);
+  renderComparisonPanels();
   setPreview("afterImage", v);
   setPreview("beforeImage", version(current, compareVersionId) || base);
   $("beforeLabel").textContent = $("splitBeforeLabel").textContent = label(
     version(current, compareVersionId) || base,
   );
   $("afterLabel").textContent = $("splitAfterLabel").textContent = label(v);
-  $("beforeNote").textContent = [
-    label(base),
-    ...(!$("previousMedia").parentElement.hidden
-      ? [label(version(current, compareVersionId))]
-      : []),
-    ...(v.id !== base.id ? [label(v)] : []),
-  ].join(" · ");
+  $("beforeNote").textContent =
+    mode === "triple"
+      ? `${label(base)} + ${visibleRevisionIds.length} 张修订`
+      : `${label(version(current, compareVersionId) || base)} · ${label(v)}`;
   $("fullSize").href = mediaUrl(v, "version");
   $("fullSize").textContent = `全尺寸 · ${label(v)} ↗`;
   const video = v.mediaType === "video";
@@ -563,6 +652,8 @@ function setActiveVersion(id) {
   point = null;
   requestId = null;
   $("formStatus").textContent = "";
+  shownRevisions();
+  showActiveInComparison();
   populateVersions();
   restoreDraft();
   renderComments();
@@ -573,12 +664,21 @@ function openPhoto(index, refreshed = false) {
   const p = filtered[index];
   if (!p) return;
   if (current) storeDraft();
-  const retained = refreshed && current?.id === p.id ? activeVersionId : null;
+  const samePhoto = refreshed && current?.id === p.id;
+  const retained = samePhoto ? activeVersionId : null;
   const oldCompare =
-    refreshed && current?.id === p.id ? compareVersionId : null;
+    samePhoto ? compareVersionId : null;
+  if (!samePhoto) {
+    visibleRevisionIds = [];
+    comparisonCustomized = false;
+  }
   current = p;
   activeVersionId = version(p, retained) ? retained : currentVersion(p)?.id;
   compareVersionId = oldCompare;
+  if (samePhoto) {
+    shownRevisions();
+    showActiveInComparison();
+  }
   selected = index;
   zoomed = false;
   marking = false;
@@ -617,8 +717,9 @@ function setMode(next) {
   $("originalFrame").hidden = isVideo || mode !== "original";
   $("video").hidden = !isVideo;
   $("compareControls").hidden = isVideo;
+  $("revisionControls").hidden = isVideo || mode !== "triple";
   $("sourceSelect").hidden =
-    isVideo || mode === "original" || !$("sourceSelect").options.length;
+    isVideo || mode !== "compare" || !$("sourceSelect").options.length;
   $("split").hidden =
     $("splitAfterLabel").hidden =
     $("splitBeforeLabel").hidden =
@@ -637,6 +738,10 @@ function setMode(next) {
   $("compareMode").setAttribute("aria-pressed", mode === "compare");
   $("originalMode").setAttribute("aria-pressed", mode === "original");
   $("zoom").setAttribute("aria-pressed", zoomed);
+  $("beforeNote").textContent =
+    mode === "triple"
+      ? `${label(original(current))} + ${visibleRevisionIds.length} 张修订`
+      : `${label(version(current, compareVersionId) || original(current))} · ${label(v)}`;
   $("picture").classList.remove("mark-mode");
   fitImage();
 }
@@ -837,6 +942,19 @@ $("sourceSelect").onchange = () => {
   populateVersions();
   setMode(mode);
 };
+$("revisionCount").onchange = () => {
+  const value = Number($("revisionCount").value);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    $("revisionCount").value = String(requestedRevisionCount);
+    return;
+  }
+  requestedRevisionCount = value;
+  comparisonCustomized = false;
+  try {
+    localStorage.setItem(revisionCountKey, String(value));
+  } catch {}
+  if (current) populateVersions();
+};
 $("tripleMode").onclick = () => setMode("triple");
 $("compareMode").onclick = () => setMode("compare");
 $("originalMode").onclick = () => setMode("original");
@@ -1011,7 +1129,7 @@ async function openAlbum(id) {
     items = data.items || [];
     comments = await api("/api/comments");
     runs = data.runs || [];
-    codex = data.codex || { model: "", reasoning_effort: "" };
+    codex = data.codex || { model: "", reasoning_effort: "", requirements: "" };
     if (generation !== albumGeneration) return;
     category = "全部";
     commentOnly = pendingOnly = false;
@@ -1118,33 +1236,66 @@ $("rescanAlbums").onclick = async () => {
 $("openSettings").onclick = () => {
   $("modelInput").value = codex.model || "";
   $("effortSelect").value = codex.reasoning_effort || "";
+  $("requirementsInput").value = codex.requirements || "";
   $("settingsResult").textContent = "";
   $("settingsResult").classList.remove("error");
+  $("runAll").disabled = !$("requirementsInput").value.trim();
   $("settingsDialog").showModal();
-  $("modelInput").focus();
+  $("requirementsInput").focus();
 };
 $("closeSettings").onclick = () => $("settingsDialog").close();
-$("settingsForm").onsubmit = async (e) => {
-  e.preventDefault();
+$("requirementsInput").oninput = () => {
+  $("runAll").disabled = settingsSaving || !$("requirementsInput").value.trim();
+};
+async function saveAlbumSettings(runAll) {
+  if (settingsSaving) return;
   settingsSaving = true;
-  $("saveSettings").disabled = true;
+  let settingsSaved = false;
+  $("saveSettings").disabled = $("runAll").disabled = true;
   $("settingsResult").textContent = "正在保存…";
   $("settingsResult").classList.remove("error");
   try {
     codex = await api("/api/codex/settings", {
       model: $("modelInput").value.trim(),
       reasoning_effort: $("effortSelect").value,
+      requirements: $("requirementsInput").value.trim(),
     });
-    $("settingsResult").textContent = "已保存。本相册后续提交将使用这些设置。";
-    toast("Codex 设置已保存");
+    settingsSaved = true;
+    if (runAll) {
+      $("settingsResult").textContent = "正在安排整册处理…";
+      const result = await api("/api/codex/run-all", {});
+      const started = result.started || [],
+        skipped = result.skipped || [],
+        failed = result.failed || [];
+      $("settingsResult").textContent = [
+        `已安排 ${started.length} 张照片；跳过 ${skipped.length} 张；启动失败 ${failed.length} 张。`,
+        ...failed.map((item) => `${item.photoId || "照片"}：${item.error || "启动失败"}`),
+      ].join("\n");
+      $("settingsResult").classList.toggle("error", failed.length > 0);
+      toast(`已安排 ${started.length} 张照片处理`);
+      refresh();
+    } else {
+      $("settingsResult").textContent =
+        "已保存。本相册后续提交将使用这些要求和模型设置。";
+      toast("相册设置已保存");
+    }
   } catch (error) {
-    $("settingsResult").textContent = error.message;
+    $("settingsResult").textContent =
+      settingsSaved && runAll
+        ? `相册设置已保存；整册任务启动失败：${error.message}`
+        : error.message;
     $("settingsResult").classList.add("error");
   } finally {
     settingsSaving = false;
     $("saveSettings").disabled = false;
+    $("runAll").disabled = !$("requirementsInput").value.trim();
   }
+}
+$("settingsForm").onsubmit = (e) => {
+  e.preventDefault();
+  saveAlbumSettings(false);
 };
+$("runAll").onclick = () => saveAlbumSettings(true);
 (async () => {
   try {
     await listAlbums();

@@ -75,7 +75,7 @@ def _parser():
     publish.add_argument("--parent-id", required=True)
     publish.add_argument("--candidate", required=True)
     publish.add_argument("--label", required=True)
-    publish.add_argument("--summary", default="")
+    publish.add_argument("--summary", required=True, help="Describe the changes made relative to the parent version")
     publish.add_argument("--crop-fraction", help="Normalized JSON [left,top,right,bottom]")
     publish.add_argument("--expected-current-id", required=True)
     publish.add_argument("--operation-id", required=True)

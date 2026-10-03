@@ -221,6 +221,8 @@ def make_server(batch_path=None, port=0, library_path=None):
                     item = store.accept_version(body['photoId'], body['versionId'])
                 elif path == '/api/codex/settings':
                     item = runner.configure(body)
+                elif path == '/api/codex/run-all':
+                    item = runner.start_all()
                 elif path == '/api/codex/run':
                     item = runner.start(body['photoId'], body['versionId'], body.get('commentIds', []))
                 elif path == '/api/export':

@@ -285,6 +285,8 @@ class Store:
                     if previous["operation_args"] != args:
                         raise ValueError("operation_id was already used with different parameters")
                     return self._version(previous)
+            if not isinstance(summary, str) or not summary.strip():
+                raise ValueError("A non-empty change summary is required")
             photo = self._require_photo(db, photo_id)
             parent = self._require_version(db, photo_id, parent_id)
             if photo["current_id"] != expected_current_id:

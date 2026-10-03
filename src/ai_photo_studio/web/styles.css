@@ -313,6 +313,24 @@ dialog::backdrop {
   border-color: var(--accent);
   color: var(--accent);
 }
+.revision-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.revision-controls input {
+  width: 58px;
+  padding: 5px;
+  background: #23281f;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.revision-controls .quiet {
+  font-size: 11px;
+}
 .source-note {
   color: var(--muted);
   font-size: 11px;
@@ -689,7 +707,7 @@ input {
   height: 100%;
   padding: 16px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--panel-count, 1), minmax(0, 1fr));
   gap: 14px;
 }
 .version-panel {
@@ -708,6 +726,34 @@ input {
 .version-panel figcaption small {
   display: block;
   color: var(--muted);
+  font-size: 11px;
+}
+.version-panel.active .version-media {
+  border-color: var(--accent);
+}
+.version-panel figcaption .version-title {
+  font-weight: 600;
+}
+.active-badge {
+  display: inline-block;
+  margin-left: 6px;
+  color: var(--green);
+  font-size: 10px;
+}
+.panel-version-select {
+  display: block;
+  margin: 7px auto 0;
+  max-width: 100%;
+  padding: 4px 6px;
+  background: #23281f;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.panel-activate {
+  display: block;
+  margin: 7px auto 0;
+  padding: 4px 8px;
   font-size: 11px;
 }
 .version-media {
@@ -735,29 +781,11 @@ input {
   font-size: 11px;
   color: var(--muted);
   margin: 0;
-  text-align: center;
-}
-@media (max-width: 1050px) {
-  .three-view {
-    height: auto;
-    grid-template-columns: 1fr;
-  }
-  .version-media {
-    min-height: 0;
-    flex: none;
-  }
-  .version-media img {
-    position: static;
-    width: 100%;
-    height: auto;
-    max-height: none;
-  }
-  .version-media img[hidden] + p {
-    padding: 55px 0;
-  }
-  .version-note:empty {
-    display: none;
-  }
+  padding: 2px 4px;
+  max-height: 110px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .selection-badge {
   position: absolute;
@@ -851,21 +879,9 @@ input {
   border-radius: 5px;
   padding: 6px;
 }
-.three-view.two {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-.three-view.one {
-  grid-template-columns: minmax(0, 1fr);
-}
 .review-badge {
   color: var(--accent);
   font-size: 11px;
-}
-@media (max-width: 1050px) {
-  .three-view.two,
-  .three-view.one {
-    grid-template-columns: 1fr;
-  }
 }
 .album-tools {
   display: flex;
@@ -919,6 +935,10 @@ input {
   border-radius: 6px;
   background: #111711;
   color: var(--text);
+}
+.settings-dialog textarea {
+  min-height: 110px;
+  max-height: 240px;
 }
 .run-status {
   font-size: 12px;

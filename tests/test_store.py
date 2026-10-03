@@ -35,9 +35,10 @@ class StoreTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already claimed"):
             self.store.start_work("p1")
         Image.new("RGB", (16, 12), "blue").save(job["candidatePath"])
-        revision = self.store.add_version("p1", original_id, job["candidatePath"], "明亮版",
+        revision = self.store.add_version("p1", original_id, job["candidatePath"], "明亮版", summary="提亮主体并收紧构图",
                                           expected_current_id=original_id, comment_ids=[comment["id"]],
                                           operation_id="edit-1", job_id=job["jobId"])
+        self.assertEqual(revision["summary"], "提亮主体并收紧构图")
         self.assertEqual(revision["parentId"], original_id)
         self.assertEqual(revision["dimensions"], [16, 12])
         self.assertTrue(Path(revision["path"]).is_file())
@@ -69,18 +70,21 @@ class StoreTest(unittest.TestCase):
         candidate = self.root / "candidate.png"
         Image.new("RGB", (10, 10), "green").save(candidate)
         with self.assertRaisesRegex(ValueError, "inside its work directory"):
-            self.store.add_version("p1", base, candidate, "A", expected_current_id=base,
+            self.store.add_version("p1", base, candidate, "A", summary="调整色调", expected_current_id=base,
                                    operation_id="job-op", job_id=job["jobId"])
-        first = self.store.add_version("p1", base, candidate, "A", expected_current_id=base,
+        with self.assertRaisesRegex(ValueError, "change summary"):
+            self.store.add_version("p1", base, candidate, "缺少说明", summary="  ", expected_current_id=base,
+                                   operation_id="empty-summary")
+        first = self.store.add_version("p1", base, candidate, "A", summary="调整色调", expected_current_id=base,
                                        operation_id="op-1")
-        retry = self.store.add_version("p1", base, candidate, "A", expected_current_id=base,
+        retry = self.store.add_version("p1", base, candidate, "A", summary="调整色调", expected_current_id=base,
                                        operation_id="op-1")
         self.assertEqual(first["id"], retry["id"])
         with self.assertRaisesRegex(ValueError, "different parameters"):
-            self.store.add_version("p1", base, candidate, "B", expected_current_id=base,
+            self.store.add_version("p1", base, candidate, "B", summary="调整色调", expected_current_id=base,
                                    operation_id="op-1")
         with self.assertRaisesRegex(ValueError, "Current version changed"):
-            self.store.add_version("p1", base, candidate, "B", expected_current_id=base,
+            self.store.add_version("p1", base, candidate, "B", summary="调整色调", expected_current_id=base,
                                    operation_id="op-2")
         self.assertEqual(len(self.store.catalog()[0]["versions"]), 2)
 

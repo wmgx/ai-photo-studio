@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,7 +23,7 @@ REPORT_SCHEMA = {
         "status": {"type": "string", "enum": ["revised", "needs_input", "failed"]},
         "candidatePath": {"type": ["string", "null"]},
         "label": {"type": ["string", "null"]},
-        "summary": {"type": ["string", "null"]},
+        "summary": {"type": ["string", "null"], "description": "修订时必填：逐项说明相对父版本实际修改的内容，不得编造"},
         "cropFraction": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
         "reply": {"type": "string"},
     },
@@ -69,21 +70,27 @@ class Runner:
         self.store = store
         self.executable = str(executable) if executable is not None else shutil.which("codex")
         self._lock = threading.RLock()
-        self._threads = {}
+        self._pending = deque()
+        self._worker = None
 
     def settings(self):
-        current = self.store.project().get("codex") or {}
+        project = self.store.project()
+        current = project.get("codex") or {}
         return {"model": current.get("model", ""),
                 "reasoning_effort": current.get("reasoning_effort", ""),
+                "requirements": project.get("preferences", {}).get("global_requirements", ""),
                 "available": bool(self.executable and shutil.which(self.executable))}
 
     def configure(self, values):
-        if not isinstance(values, dict) or not set(values).issubset({"model", "reasoning_effort", "albumId"}):
-            raise ValueError("Only model and reasoning_effort can be configured")
+        if not isinstance(values, dict) or not set(values).issubset({"model", "reasoning_effort", "requirements", "albumId"}):
+            raise ValueError("Only model, reasoning_effort and requirements can be configured")
         with self._lock:
             old = self.settings()
             model = values.get("model", old["model"])
             effort = values.get("reasoning_effort", old["reasoning_effort"])
+            requirements = values.get("requirements", old["requirements"])
+            if not isinstance(requirements, str) or len(requirements) > 5000:
+                raise ValueError("相册统一要求必须是文字，最多 5000 字")
             if not isinstance(model, str) or not MODEL.fullmatch(model):
                 raise ValueError("Invalid model name")
             if not isinstance(effort, str) or effort not in EFFORTS:
@@ -91,6 +98,7 @@ class Runner:
             path = self.store._managed("project.json")
             project = json.loads(path.read_text(encoding="utf-8"))
             project["codex"] = {"model": model, "reasoning_effort": effort}
+            project.setdefault("preferences", {})["global_requirements"] = requirements.strip()
             _write_json(path, project)
             return self.settings()
 
@@ -119,7 +127,7 @@ class Runner:
         with self._lock:
             result = self._all_runs()
             for run in result:
-                if run.get("status") == "running" and not _alive(run.get("pid")):
+                if run.get("status") in ("queued", "running") and not _alive(run.get("pid")):
                     self._fail(run, "本机 Codex 任务中断，候选文件仍保留在工作目录。")
             return sorted(result, key=lambda item: item.get("startedAt", ""), reverse=True)
 
@@ -128,7 +136,7 @@ class Runner:
             raise ValueError("Codex CLI is not installed or cannot be run")
         with self._lock:
             for run in self.runs():
-                if run.get("photoId") == photo_id and run.get("status") == "running":
+                if run.get("photoId") == photo_id and run.get("status") in ("queued", "running"):
                     same_comments = (run.get("commentIds") == comment_ids) if comment_ids is not None else not any(
                         item["status"] == "open" for item in self.store.comments(photo_id=photo_id,
                                                                                    version_id=run["versionId"]))
@@ -140,20 +148,61 @@ class Runner:
             run = {"jobId": work["jobId"], "photoId": photo_id,
                    "versionId": work["baseVersionId"],
                    "commentIds": [item["id"] for item in work["comments"]],
-                   "status": "running", "model": settings["model"],
+                   "status": "queued", "model": settings["model"],
                    "reasoning_effort": settings["reasoning_effort"],
                    "startedAt": _now(), "updatedAt": _now(), "pid": os.getpid(),
                    "workDir": work["workDir"], "resultVersionId": None,
                    "reply": None, "error": None}
             self._save(run)
-            worker = threading.Thread(target=self._execute, args=(work, run), daemon=True,
-                                      name=f"ai-photo-studio-{run['jobId']}")
-            self._threads[run["jobId"]] = worker
-            worker.start()
+            self._pending.append((work, run))
+            if self._worker is None:
+                self._worker = threading.Thread(target=self._drain, daemon=True,
+                                                name="ai-photo-studio-edits")
+                self._worker.start()
             return dict(run)
+
+    def _drain(self):
+        while True:
+            with self._lock:
+                if not self._pending:
+                    self._worker = None
+                    return
+                work, run = self._pending.popleft()
+            self._execute(work, run)
+
+    def start_all(self):
+        """Capture this album's requirements and enqueue each image once."""
+        with self._lock:
+            settings = self.settings()
+            requirements = settings["requirements"].strip()
+            if not requirements:
+                raise ValueError("请先填写并保存相册统一要求")
+            if not settings["available"]:
+                raise ValueError("Codex CLI is not installed or cannot be run")
+            active = {run["photoId"] for run in self.runs() if run["status"] in ("queued", "running")}
+            result = {"started": [], "skipped": [], "failed": []}
+            for photo in self.store.catalog():
+                version = next(v for v in photo["versions"] if v["id"] == photo["currentVersionId"])
+                if version["mediaType"] != "image" or photo["id"] in active:
+                    reason = "动态素材保留原文件" if version["mediaType"] != "image" else "已有任务排队或处理中"
+                    result["skipped"].append({"photoId": photo["id"], "reason": reason})
+                    continue
+                comment = None
+                try:
+                    comment = self.store.comment_add(photo["id"], version["id"],
+                                                     "按本次相册统一要求修改：\n" + requirements, submit=True)
+                    pending_ids = [item["id"] for item in self.store.comments(
+                        photo_id=photo["id"], version_id=version["id"], status="open")]
+                    result["started"].append(self.start(photo["id"], version["id"], pending_ids))
+                except (ValueError, OSError, sqlite3.Error) as error:
+                    if comment:
+                        self.store.comment_reply(comment["id"], str(error), status="failed")
+                    result["failed"].append({"photoId": photo["id"], "error": str(error)})
+            return result
 
     def _prompt(self, work):
         comments = work["comments"]
+        requirements = work.get("preferences", {}).get("global_requirements", "")
         return ("你在本地处理照片审片任务。只在当前工作目录内写候选图、蒙版、脚本和中间文件。"
                 "可以只读查看给定的原片、RAW、参考图和历史版本；不得修改或删除它们，也不得改项目配置、数据库、正式版本或评论。"
                 "不要调用外部图像生成、上传或远程修图服务；使用本机工具处理素材。"
@@ -161,8 +210,12 @@ class Runner:
                 "原片预览不裁切；成片若裁切，在 cropFraction 中准确提供原图归一化范围。"
                 "如果无法可靠完成，返回 needs_input 或 failed，并在 reply 用中文说明。"
                 "只输出符合给定 JSON schema 的结果。修订时 candidatePath 必须指向当前工作目录内的真实图像文件，"
-                "label、summary、reply 均用中文；未修订时 candidatePath 与 cropFraction 填 null。"
+                "label、summary、reply 均用中文。summary 不得为空，逐项写明相对父版本实际修改的内容，"
+                "包括实际改动的曝光、颜色、构图或人物细节；可用换行列表，不得声称未执行的改动。"
+                "未修订时 candidatePath 与 cropFraction 填 null。"
+                "相册统一要求适用于每张图片；单图意见有明确不同要求时以单图意见为准，并保留人物身份与真实场景。"
                 "不要执行 ai-photo-studio 的 publish、select、accept 或 comments reply；本程序会在校验后登记新版本，交由用户审阅。\n\n"
+                f"相册统一要求：{requirements or '未设置'}\n\n"
                 f"任务材料：{json.dumps(work, ensure_ascii=False, indent=2)}\n\n"
                 f"本次要处理的意见：{json.dumps(comments, ensure_ascii=False, indent=2)}\n")
 
@@ -211,7 +264,7 @@ class Runner:
             candidate = self._candidate(work, report.get("candidatePath"))
             label = report.get("label")
             summary = report.get("summary")
-            if not isinstance(label, str) or not label.strip() or not isinstance(summary, str):
+            if not isinstance(label, str) or not label.strip() or not isinstance(summary, str) or not summary.strip():
                 raise ValueError("Codex result needs a label and summary")
             version = self.store.add_version(
                 work["photoId"], work["baseVersionId"], candidate, label,
@@ -242,6 +295,9 @@ class Runner:
         schema = work_dir / "report_schema.json"
         result = work_dir / "result.json"
         try:
+            with self._lock:
+                run["status"] = "running"
+                self._save(run)
             _write_json(schema, REPORT_SCHEMA)
             prompt = self._prompt(work)
             (work_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -256,6 +312,3 @@ class Runner:
             self._finish(work, run, report)
         except Exception as exc:
             self._fail(run, f"本机 Codex 处理未完成：{exc}")
-        finally:
-            with self._lock:
-                self._threads.pop(run["jobId"], None)
