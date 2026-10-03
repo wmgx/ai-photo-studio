@@ -6,9 +6,14 @@ let items = [],
   project = { name: "AI 修图工作台", root: "" },
   albums = [],
   albumId = "",
+  libraryRoot = "",
   codex = { model: "", reasoning_effort: "", requirements: "" },
   runs = [],
   albumGeneration = 0;
+let albumLoading = false,
+  albumDialogMode = "open",
+  albumDialogSaving = false,
+  directoryGeneration = 0;
 let category = "全部",
   commentOnly = false,
   pendingOnly = false,
@@ -60,7 +65,13 @@ function toast(value) {
   timer = setTimeout(() => ($("toast").hidden = true), 3000);
 }
 async function api(path, data) {
-  const global = path === "/api/albums" || path === "/api/albums/open",
+  const global = [
+      "/api/albums",
+      "/api/albums/open",
+      "/api/albums/register",
+      "/api/albums/create",
+      "/api/directories",
+    ].includes(path.split("?")[0]),
     id = albumId,
     url =
       data === undefined && !global
@@ -255,10 +266,10 @@ function renderGrid(focus = false) {
         "p",
         "empty",
         !albums.length
-          ? "请在指定照片根目录下放入照片文件夹，然后点击“刷新目录”。"
+          ? "点击“打开相册目录”选择已有照片文件夹，或点击“新建相册”。"
           : items.length
             ? "没有匹配的照片"
-            : "这个相册还没有可审阅的照片",
+            : `这个相册还没有照片。请将照片放入 ${albums.find((a) => a.id === albumId)?.path || "相册目录"}，然后点击“刷新目录”。`,
       ),
     );
   if (focus) selectCard(selected, true);
@@ -1036,7 +1047,12 @@ $("pendingFilter").onclick = () => {
 };
 $("search").oninput = () => renderGrid();
 document.addEventListener("keydown", (e) => {
-  if ($("exportDialog").open || $("settingsDialog").open) return;
+  if (
+    albumLoading ||
+    $("albumDialog").open ||
+    $("exportDialog").open ||
+    $("settingsDialog").open
+  ) return;
   if (e.target.matches("input,textarea,select,[contenteditable=true]")) return;
   if ($("viewer").open) {
     if (["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"].includes(e.key)) {
@@ -1074,13 +1090,15 @@ function renderAlbums() {
   const select = $("albumSelect");
   select.replaceChildren();
   for (const a of albums) {
-    const option = el("option", null, `${a.name} · ${a.count ?? 0} 项`);
+    const option = el("option", null, `${a.name} · ${a.count ?? 0} 项 — ${a.path || ""}`);
     option.value = a.id;
     select.append(option);
   }
   if (albumId) select.value = albumId;
-  select.disabled = !albums.length;
-  $("openSettings").disabled = !albumId;
+  select.disabled = !albums.length || albumLoading;
+  $("openSettings").disabled = !albumId || albumLoading;
+  $("albumPath").textContent = albums.find((a) => a.id === albumId)?.path ||
+    (libraryRoot ? `照片根目录：${libraryRoot}` : "");
   if (!albums.length) {
     $("projectName").textContent = "暂无相册目录";
     $("stats").textContent = "";
@@ -1088,7 +1106,7 @@ function renderAlbums() {
       el(
         "p",
         "empty",
-        "请在指定照片根目录下放入照片文件夹，然后点击“刷新目录”。",
+        "点击“打开相册目录”选择已有照片文件夹，或点击“新建相册”。",
       ),
     );
   }
@@ -1096,12 +1114,14 @@ function renderAlbums() {
 async function listAlbums() {
   const data = await api("/api/albums");
   token = data.token || token;
+  libraryRoot = data.libraryRoot || libraryRoot;
   albums = data.albums || [];
   renderAlbums();
   return albums;
 }
 async function openAlbum(id) {
   if (
+    albumLoading ||
     writing ||
     selectionSaving ||
     exporting ||
@@ -1118,8 +1138,13 @@ async function openAlbum(id) {
     generation = ++albumGeneration;
   if (current) closeViewer();
   albumId = id;
+  albumLoading = true;
   $("albumSelect").disabled = true;
   $("rescanAlbums").disabled = true;
+  $("openAlbumDirectory").disabled = true;
+  $("createAlbum").disabled = true;
+  $("openSettings").disabled = true;
+  $("grid").setAttribute("aria-busy", "true");
   $("loadError").textContent = "";
   try {
     const data = await api("/api/albums/open", { albumId: id });
@@ -1147,7 +1172,6 @@ async function openAlbum(id) {
     );
     renderFilters();
     renderGrid();
-    $("openSettings").disabled = false;
   } catch (error) {
     if (generation === albumGeneration) {
       albumId = previous;
@@ -1156,14 +1180,17 @@ async function openAlbum(id) {
     }
   } finally {
     if (generation === albumGeneration) {
-      $("albumSelect").disabled = false;
+      albumLoading = false;
+      $("grid").removeAttribute("aria-busy");
       $("rescanAlbums").disabled = false;
-      $("albumSelect").value = albumId;
+      $("openAlbumDirectory").disabled = false;
+      $("createAlbum").disabled = false;
+      renderAlbums();
     }
   }
 }
 async function refresh() {
-  if (!albumId) return;
+  if (!albumId || albumLoading) return;
   const generation = albumGeneration;
   try {
     const [data, fresh, newRuns] = await Promise.all([
@@ -1203,9 +1230,138 @@ async function refresh() {
     }
   } catch {}
 }
+function albumActionsBusy() {
+  return (
+    albumLoading ||
+    albumDialogSaving ||
+    writing ||
+    selectionSaving ||
+    exporting ||
+    submitting ||
+    accepting ||
+    settingsSaving
+  );
+}
+async function browseDirectory(path) {
+  const generation = ++directoryGeneration;
+  const result = $("albumDialogResult");
+  result.textContent = "正在读取目录…";
+  result.classList.remove("error");
+  try {
+    const data = await api(
+      "/api/directories?path=" + encodeURIComponent(path || ""),
+    );
+    if (generation !== directoryGeneration || !$("albumDialog").open) return;
+    $("albumDirectory").value = data.path;
+    $("directoryLocation").textContent = data.path;
+    $("directoryParent").dataset.parent = data.parent || "";
+    $("directoryParent").disabled = !data.parent;
+    $("directoryParent").onclick = () => browseDirectory(data.parent);
+    const list = $("directoryChildren");
+    list.replaceChildren();
+    for (const child of data.children || []) {
+      const button = el("button", "directory-child", child.name);
+      button.type = "button";
+      button.title = child.path;
+      button.onclick = () => browseDirectory(child.path);
+      list.append(button);
+    }
+    if (!list.childElementCount)
+      list.append(el("p", "quiet", "这里没有子目录。可以选择当前目录。"));
+    result.textContent = "";
+  } catch (error) {
+    if (generation !== directoryGeneration || !$("albumDialog").open) return;
+    result.textContent = error.message;
+    result.classList.add("error");
+  }
+}
+function showAlbumDialog(mode) {
+  if (albumActionsBusy()) {
+    toast("请等待当前操作完成");
+    return;
+  }
+  albumDialogMode = mode;
+  const creating = mode === "create";
+  $("albumDialogTitle").textContent = creating ? "新建相册" : "打开相册目录";
+  $("albumDialogHint").textContent = creating
+    ? "选择新相册所在的上级目录，填写名称后创建。"
+    : "选择或输入已有照片文件夹。照片会留在原处。";
+  $("albumNameGroup").hidden = !creating;
+  $("albumName").required = creating;
+  $("albumName").value = "";
+  $("confirmAlbumDialog").textContent = creating ? "创建并打开" : "打开相册";
+  $("albumDialogResult").textContent = "";
+  $("albumDialogResult").classList.remove("error");
+  $("directoryChildren").replaceChildren();
+  $("albumDirectory").value = creating
+    ? libraryRoot
+    : albums.find((a) => a.id === albumId)?.path || libraryRoot;
+  $("albumDialog").showModal();
+  browseDirectory($("albumDirectory").value);
+  $(creating ? "albumName" : "albumDirectory").focus();
+}
+$("openAlbumDirectory").onclick = () => showAlbumDialog("open");
+$("createAlbum").onclick = () => showAlbumDialog("create");
+$("cancelAlbumDialog").onclick = () => $("albumDialog").close();
+$("albumDialog").addEventListener("cancel", (event) => {
+  if (albumDialogSaving) event.preventDefault();
+});
+$("albumDialog").addEventListener("close", () => ++directoryGeneration);
+$("albumDirectory").oninput = () => {
+  ++directoryGeneration;
+  $("albumDialogResult").textContent = "";
+};
+$("browseDirectory").onclick = () =>
+  browseDirectory($("albumDirectory").value.trim());
+$("albumForm").onsubmit = async (event) => {
+  event.preventDefault();
+  if (albumActionsBusy()) return;
+  const path = $("albumDirectory").value.trim();
+  const name = $("albumName").value.trim();
+  const creating = albumDialogMode === "create";
+  if (!path.startsWith("/")) {
+    $("albumDialogResult").textContent = "请输入以 / 开头的绝对路径";
+    $("albumDialogResult").classList.add("error");
+    return;
+  }
+  if (creating && !name) {
+    $("albumDialogResult").textContent = "请填写相册名称";
+    $("albumDialogResult").classList.add("error");
+    return;
+  }
+  albumDialogSaving = true;
+  ++directoryGeneration;
+  for (const control of $("albumForm").querySelectorAll("button,input"))
+    control.disabled = true;
+  $("albumDialogResult").classList.remove("error");
+  $("albumDialogResult").textContent = creating ? "正在创建相册…" : "正在打开相册…";
+  try {
+    const response = await api(
+      creating ? "/api/albums/create" : "/api/albums/register",
+      creating ? { parent: path, name } : { path },
+    );
+    await listAlbums();
+    if (!albums.some((album) => album.id === response.album?.id))
+      throw Error("相册已登记，但列表尚未更新；请点击“刷新目录”");
+    $("albumDialog").close();
+    albumDialogSaving = false;
+    await openAlbum(response.album.id);
+    if (albumId === response.album.id)
+      toast(creating ? "相册已创建" : "相册已打开");
+  } catch (error) {
+    $("albumDialogResult").textContent = error.message;
+    $("albumDialogResult").classList.add("error");
+  } finally {
+    albumDialogSaving = false;
+    for (const control of $("albumForm").querySelectorAll("button,input"))
+      control.disabled = false;
+    $("directoryParent").disabled = !$("directoryParent").dataset.parent;
+  }
+};
 $("albumSelect").onchange = () => openAlbum($("albumSelect").value);
 $("rescanAlbums").onclick = async () => {
   if (
+    albumLoading ||
     writing ||
     selectionSaving ||
     exporting ||

@@ -890,6 +890,11 @@ input {
   flex-wrap: wrap;
   margin-bottom: 16px;
 }
+.album-path {
+  margin: -8px 0 18px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .album-tools label {
   color: var(--muted);
 }
@@ -904,6 +909,63 @@ input {
 }
 .album-tools .quiet {
   font-size: 12px;
+}
+.album-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 23px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #20251e;
+}
+.album-dialog h2 {
+  margin-top: 0;
+}
+.album-dialog label {
+  display: block;
+  margin: 14px 0 6px;
+}
+.album-dialog input {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #687361;
+  border-radius: 6px;
+  background: #111711;
+  color: var(--text);
+}
+.directory-input,
+.directory-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.directory-input input,
+.directory-heading span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.directory-browser {
+  margin-top: 12px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #181d17;
+}
+.directory-children {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 7px;
+  max-height: 240px;
+  margin-top: 10px;
+  overflow: auto;
+}
+.directory-child {
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 .settings-dialog {
   width: min(550px, calc(100vw - 32px));

@@ -24,27 +24,28 @@ CODE = Path(__file__).resolve().parent
 
 
 def make_server(batch_path=None, port=0, library_path=None):
-    library = Library(library_path) if library_path else None
-    if not library and not batch_path:
+    if not library_path and not batch_path:
         raise ValueError('请指定相册根目录或批次目录')
+    library = Library(library_path or Path(batch_path).expanduser().absolute())
     stores, runners = {}, {}
     album_lock = threading.RLock()
     token = secrets.token_urlsafe(32)
-    if not library:
+    if not library_path:
         stores['batch'] = Store(batch_path)
         runners['batch'] = Runner(stores['batch'])
 
     def albums():
-        if library:
-            return library.albums()
-        store = stores['batch']
-        return [{'id': 'batch', 'name': store.project()['name'],
-                 'path': str(store.root), 'count': len(store.catalog())}]
+        available = library.albums()
+        if 'batch' in stores:
+            store = stores['batch']
+            available.insert(0, {'id': 'batch', 'name': store.project()['name'],
+                                 'path': str(store.root), 'count': len(store.catalog())})
+        return available
 
     def get_store(album_id=None, open_album=False):
-        album_id = album_id or ('batch' if not library else None)
+        album_id = album_id or ('batch' if not library_path else None)
         with album_lock:
-            if library and open_album:
+            if open_album and album_id != 'batch':
                 stores[album_id] = library.open(album_id)
                 if album_id not in runners:
                     runners[album_id] = Runner(stores[album_id])
@@ -166,8 +167,10 @@ def make_server(batch_path=None, port=0, library_path=None):
                 if path in ('/assets/app.js', '/assets/styles.css'):
                     return self.file_response(CODE / 'web' / path.rsplit('/', 1)[-1])
                 if path == '/api/albums':
-                    return self.json_response({'albums': albums(), 'token': token})
+                    return self.json_response({'albums': albums(), 'token': token, 'libraryRoot': str(library.root)})
                 query = parse_qs(urlsplit(self.path).query)
+                if path == '/api/directories':
+                    return self.json_response(library.browse(query.get('path', [None])[0]))
                 store, runner = get_store(query.get('album', [None])[0])
                 if path == '/api/catalog':
                     return self.json_response(catalog(store, runner))
@@ -204,6 +207,10 @@ def make_server(batch_path=None, port=0, library_path=None):
                 if not isinstance(body, dict):
                     raise ValueError('请求必须为JSON对象')
                 path = urlsplit(self.path).path
+                if path == '/api/albums/register':
+                    return self.json_response({'album': library.register(body['path'])})
+                if path == '/api/albums/create':
+                    return self.json_response({'album': library.create(body['parent'], body['name'])})
                 if path == '/api/albums/open':
                     store, runner = get_store(body.get('albumId'), open_album=True)
                     return self.json_response(catalog(store, runner))

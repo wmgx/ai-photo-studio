@@ -19,6 +19,8 @@
       <div class="album-tools">
         <label for="albumSelect">相册目录</label
         ><select id="albumSelect" aria-label="选择相册目录"></select
+        ><button id="openAlbumDirectory" type="button">打开相册目录</button
+        ><button id="createAlbum" type="button" class="primary">新建相册</button
         ><button id="rescanAlbums" type="button">刷新目录</button
         ><button id="openSettings" type="button" disabled>相册设置</button
         ><span id="codexHint" class="quiet"
@@ -26,6 +28,7 @@
           配置运行，并非离线修图。</span
         >
       </div>
+      <p id="albumPath" class="album-path quiet" aria-live="polite"></p>
       <div class="gallery-tools">
         <nav class="filters" id="filters" aria-label="照片分类">
           <button data-category="全部" aria-pressed="true">全部</button
@@ -227,6 +230,35 @@
           ><button class="primary" type="submit" id="submitExport">
             开始导出
           </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="albumDialog" class="album-dialog" aria-label="选择相册目录">
+      <form id="albumForm">
+        <h2 id="albumDialogTitle">打开相册目录</h2>
+        <p id="albumDialogHint" class="quiet"></p>
+        <label for="albumDirectory">目录路径</label>
+        <div class="directory-input">
+          <input id="albumDirectory" type="text" autocomplete="off" spellcheck="false" required
+            placeholder="输入或浏览本机目录的绝对路径" />
+          <button id="browseDirectory" type="button">浏览</button>
+        </div>
+        <div id="directoryBrowser" class="directory-browser" aria-label="目录浏览">
+          <div class="directory-heading">
+            <span id="directoryLocation" class="quiet"></span>
+            <button id="directoryParent" type="button">上一级</button>
+          </div>
+          <div id="directoryChildren" class="directory-children"></div>
+        </div>
+        <div id="albumNameGroup" hidden>
+          <label for="albumName">新相册名称</label>
+          <input id="albumName" type="text" autocomplete="off" maxlength="120"
+            placeholder="例如：秋天旅行" />
+        </div>
+        <div id="albumDialogResult" class="export-result" role="status" aria-live="polite"></div>
+        <div class="export-actions">
+          <button id="cancelAlbumDialog" type="button">取消</button>
+          <button id="confirmAlbumDialog" class="primary" type="submit">打开相册</button>
         </div>
       </form>
     </dialog>
