@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -132,6 +133,11 @@ class Store:
         self.db_path = self._managed(".review", "state.sqlite3")
         if not self.db_path.is_file():
             raise ValueError("Batch database is missing")
+        # Existing albums predate the recycle bin; create only its metadata table.
+        with self._db(True) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS tombstones(photo_id TEXT NOT NULL, "
+                       "version_id TEXT NOT NULL DEFAULT '', deleted_at TEXT NOT NULL, "
+                       "PRIMARY KEY(photo_id, version_id))")
 
     def _managed(self, *parts):
         target = self.root
@@ -172,6 +178,8 @@ class Store:
                 CREATE TABLE jobs(id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, version_id TEXT NOT NULL,
                     comment_ids TEXT NOT NULL, created_at TEXT NOT NULL);
                 CREATE INDEX comments_for_version ON comments(version_id, status);
+                CREATE TABLE IF NOT EXISTS tombstones(photo_id TEXT NOT NULL, version_id TEXT NOT NULL DEFAULT '',
+                    deleted_at TEXT NOT NULL, PRIMARY KEY(photo_id, version_id));
             """)
 
     @contextmanager
@@ -205,28 +213,90 @@ class Store:
                 "createdAt": row["created_at"], "summary": row["summary"], "kind": row["kind"],
                 "mediaType": row["media_type"], "reviewStatus": row["review_status"]}
 
-    def _photo(self, db, row):
-        versions = db.execute("SELECT * FROM versions WHERE photo_id=? ORDER BY created_at, rowid", (row["id"],)).fetchall()
+    def _photo(self, db, row, include_deleted=False):
+        sql = "SELECT * FROM versions WHERE photo_id=?"
+        if not include_deleted:
+            sql += " AND id NOT IN (SELECT version_id FROM tombstones WHERE photo_id=? AND version_id!='')"
+        args = (row["id"], row["id"]) if not include_deleted else (row["id"],)
+        versions = db.execute(sql + " ORDER BY created_at, rowid", args).fetchall()
         return {"id": row["id"], "scene": row["scene"], "category": row["category"],
                 "sources": json.loads(row["sources"]), "currentVersionId": row["current_id"],
                 "selectedVersionId": row["selected_id"], "versions": [self._version(v) for v in versions]}
 
-    def catalog(self):
+    def catalog(self, include_deleted=False):
         with self._db() as db:
-            return [self._photo(db, r) for r in db.execute("SELECT * FROM photos ORDER BY rowid")]
+            sql = "SELECT * FROM photos"
+            if not include_deleted:
+                sql += " WHERE id NOT IN (SELECT photo_id FROM tombstones WHERE version_id='')"
+            return [self._photo(db, r, include_deleted) for r in db.execute(sql + " ORDER BY rowid")]
+
+    def trash(self):
+        with self._db() as db:
+            rows = db.execute("SELECT t.photo_id,t.version_id,t.deleted_at,p.scene,v.label "
+                              "FROM tombstones t JOIN photos p ON p.id=t.photo_id "
+                              "LEFT JOIN versions v ON v.id=t.version_id "
+                              "WHERE t.version_id='' OR NOT EXISTS "
+                              "(SELECT 1 FROM tombstones whole WHERE whole.photo_id=t.photo_id AND whole.version_id='') "
+                              "ORDER BY t.deleted_at DESC,t.rowid DESC").fetchall()
+            return [{"kind": "version" if row["version_id"] else "photo",
+                     "photoId": row["photo_id"], "versionId": row["version_id"] or None,
+                     "scene": row["scene"], "label": row["label"] or row["scene"],
+                     "deletedAt": row["deleted_at"]} for row in rows]
+
+    def trash_item(self, photo_id, version_id=None):
+        with self._db(True) as db:
+            photo = self._require_photo(db, photo_id)
+            if db.execute("SELECT 1 FROM comments WHERE photo_id=? AND status='running' LIMIT 1", (photo_id,)).fetchone():
+                raise ValueError("这张照片有正在处理的评论，请等待任务结束后再删除")
+            key = _id(version_id, "version_id") if version_id is not None else ""
+            if version_id is not None:
+                version = self._require_version(db, photo_id, version_id)
+                if version["kind"] == "original":
+                    raise ValueError("原片版本不能单独删除；可以删除整张照片")
+            if db.execute("SELECT 1 FROM tombstones WHERE photo_id=? AND version_id=?", (photo_id, key)).fetchone():
+                raise ValueError("已在回收站中")
+            db.execute("INSERT INTO tombstones VALUES(?,?,?)", (photo_id, key, _now()))
+            if version_id is None:
+                db.execute("UPDATE photos SET selected_id=NULL WHERE id=?", (photo_id,))
+            else:
+                if photo["selected_id"] == version_id:
+                    db.execute("UPDATE photos SET selected_id=NULL WHERE id=?", (photo_id,))
+                if photo["current_id"] == version_id:
+                    fallback = db.execute("SELECT id FROM versions WHERE photo_id=? AND id NOT IN "
+                                          "(SELECT version_id FROM tombstones WHERE photo_id=?) "
+                                          "ORDER BY created_at DESC,rowid DESC LIMIT 1", (photo_id, photo_id)).fetchone()
+                    db.execute("UPDATE photos SET current_id=? WHERE id=?", (fallback["id"], photo_id))
+        return {"ok": True}
+
+    def restore_item(self, photo_id, version_id=None):
+        key = _id(version_id, "version_id") if version_id is not None else ""
+        with self._db(True) as db:
+            self._require_photo(db, photo_id, include_deleted=version_id is None)
+            if version_id is not None:
+                self._require_version(db, photo_id, version_id, include_deleted=True)
+            cursor = db.execute("DELETE FROM tombstones WHERE photo_id=? AND version_id=?", (photo_id, key))
+            if cursor.rowcount != 1:
+                raise ValueError("该项目不在回收站中")
+        return {"ok": True}
 
     @staticmethod
-    def _require_photo(db, photo_id):
+    def _require_photo(db, photo_id, include_deleted=False):
         row = db.execute("SELECT * FROM photos WHERE id=?", (_id(photo_id, "photo_id"),)).fetchone()
         if row is None:
             raise ValueError(f"Unknown photo: {photo_id}")
+        if not include_deleted and db.execute("SELECT 1 FROM tombstones WHERE photo_id=? AND version_id=''", (photo_id,)).fetchone():
+            raise ValueError("照片已移入回收站，请先恢复")
         return row
 
     @staticmethod
-    def _require_version(db, photo_id, version_id):
+    def _require_version(db, photo_id, version_id, include_deleted=False):
         row = db.execute("SELECT * FROM versions WHERE photo_id=? AND id=?", (photo_id, _id(version_id, "version_id"))).fetchone()
         if row is None:
             raise ValueError(f"Unknown version for photo {photo_id}: {version_id}")
+        if not include_deleted:
+            Store._require_photo(db, photo_id)
+            if db.execute("SELECT 1 FROM tombstones WHERE photo_id=? AND version_id=?", (photo_id, version_id)).fetchone():
+                raise ValueError("版本已移入回收站，请先恢复")
         return row
 
     def add_photo(self, path, photo_id=None, category="风景", scene=None, source_paths=None):
@@ -284,6 +354,7 @@ class Store:
                 if previous is not None:
                     if previous["operation_args"] != args:
                         raise ValueError("operation_id was already used with different parameters")
+                    self._require_version(db, photo_id, previous["id"])
                     return self._version(previous)
             if not isinstance(summary, str) or not summary.strip():
                 raise ValueError("A non-empty change summary is required")
@@ -329,26 +400,35 @@ class Store:
                 "createdAt": row["created_at"]}
 
     def comments(self, photo_id=None, version_id=None, status=None):
-        sql, args = "SELECT * FROM comments WHERE 1=1", []
+        sql, args = ("SELECT c.* FROM comments c WHERE c.photo_id NOT IN "
+                     "(SELECT photo_id FROM tombstones WHERE version_id='') "
+                     "AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.photo_id=c.photo_id "
+                     "AND t.version_id=c.version_id)"), []
         for column, value in (("photo_id", photo_id), ("version_id", version_id), ("status", status)):
             if value is not None:
-                sql += f" AND {column}=?"
+                sql += f" AND c.{column}=?"
                 args.append(value)
         with self._db() as db:
-            return [self._comment(r) for r in db.execute(sql + " ORDER BY created_at, rowid", args)]
+            return [self._comment(r) for r in db.execute(sql + " ORDER BY c.created_at, c.rowid", args)]
 
     def comment_add(self, photo_id, version_id, text, point=None, submit=False, comment_id=None):
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Comment text is required")
-        if point is not None:
-            if not isinstance(point, dict) or set(point) != {"x", "y"} or not all(isinstance(point[x], (int, float)) and not isinstance(point[x], bool) and 0 <= point[x] <= 1 for x in ("x", "y")):
-                raise ValueError("point must be normalized {x,y}")
+        points = point if isinstance(point, list) else ([] if point is None else [point])
+        if points == []:
+            point = None
+        if any(not isinstance(item, dict) or set(item) != {"x", "y"} or
+               not all(isinstance(item[axis], (int, float)) and not isinstance(item[axis], bool) and
+                       0 <= item[axis] <= 1 and math.isfinite(item[axis]) for axis in ("x", "y"))
+               for item in points):
+            raise ValueError("point must be normalized {x,y} or a list of normalized {x,y} points")
         comment_id = _id(comment_id or _uuid(), "comment_id")
         with self._db(True) as db:
             previous = db.execute("SELECT * FROM comments WHERE id=?", (comment_id,)).fetchone()
             if previous is not None:
                 if (previous["photo_id"], previous["version_id"], previous["text"], previous["point"]) != (photo_id, version_id, text, _json(point) if point else None):
                     raise ValueError("comment_id was already used with different parameters")
+                self._require_version(db, photo_id, version_id)
                 return self._comment(previous)
             self._require_version(db, photo_id, version_id)
             db.execute("INSERT INTO comments VALUES(?,?,?,?,?,?,?,?,?)",
@@ -361,6 +441,7 @@ class Store:
             row = db.execute("SELECT * FROM comments WHERE id=?", (_id(comment_id),)).fetchone()
             if row is None or row["status"] not in ("saved", "open", "failed"):
                 raise ValueError("Only saved, open or failed comments can be submitted")
+            self._require_version(db, row["photo_id"], row["version_id"])
             db.execute("UPDATE comments SET status='open' WHERE id=?", (comment_id,))
             return self._comment(db.execute("SELECT * FROM comments WHERE id=?", (comment_id,)).fetchone())
 
@@ -373,12 +454,17 @@ class Store:
             row = db.execute("SELECT * FROM comments WHERE id=?", (_id(comment_id),)).fetchone()
             if row is None:
                 raise ValueError("Unknown comment")
+            self._require_version(db, row["photo_id"], row["version_id"])
             if row["status"] == "resolved":
                 raise ValueError("Resolved comments cannot be changed")
             if result_version_id is not None:
                 self._require_version(db, row["photo_id"], result_version_id)
             else:
                 result_version_id = row["result_version_id"]
+                if result_version_id is not None and db.execute(
+                    "SELECT 1 FROM tombstones WHERE photo_id=? AND version_id=?",
+                    (row["photo_id"], result_version_id)).fetchone():
+                    result_version_id = None
             db.execute("UPDATE comments SET reply=?,status=?,result_version_id=? WHERE id=?",
                        (text, status, result_version_id, comment_id))
             return self._comment(db.execute("SELECT * FROM comments WHERE id=?", (comment_id,)).fetchone())
@@ -398,9 +484,11 @@ class Store:
             db.execute("UPDATE comments SET status='resolved' WHERE result_version_id=? AND status='ready'", (version_id,))
             return self._version(self._require_version(db, photo_id, version_id))
 
-    def start_work(self, photo_id, version_id=None, comment_ids=None, include_saved=False):
+    def start_work(self, photo_id, version_id=None, comment_ids=None, include_saved=False, expected_current_id=None):
         with self._db(True) as db:
             photo = self._require_photo(db, photo_id)
+            if expected_current_id is not None and photo["current_id"] != expected_current_id:
+                raise ValueError("Current version changed since album analysis; review the latest version first")
             version_id = version_id or photo["current_id"]
             version = self._require_version(db, photo_id, version_id)
             original = db.execute("SELECT * FROM versions WHERE photo_id=? AND kind='original'", (photo_id,)).fetchone()
@@ -435,6 +523,16 @@ class Store:
                 db.execute("UPDATE comments SET status='running' WHERE id=?", (cid,))
             project = self.project()
             base_path = self._version_path(version)
+            history_versions = db.execute(
+                "SELECT * FROM versions WHERE photo_id=? ORDER BY created_at,rowid", (photo_id,)).fetchall()
+            history_comments = db.execute(
+                "SELECT * FROM comments WHERE photo_id=? AND status!='saved' ORDER BY created_at,rowid",
+                (photo_id,)).fetchall()
+            history_jobs = db.execute(
+                "SELECT * FROM jobs WHERE photo_id=? AND id!=? ORDER BY created_at,rowid",
+                (photo_id, job_id)).fetchall()
+            deleted_versions = {row["version_id"]: row["deleted_at"] for row in db.execute(
+                "SELECT version_id,deleted_at FROM tombstones WHERE photo_id=? AND version_id!=''", (photo_id,))}
             payload = {"workDir": str(work_dir), "jobId": job_id, "photoId": photo_id,
                        "baseVersionId": version_id, "expectedCurrentVersionId": photo["current_id"],
                        "baseVersion": self._version(version), "originalVersion": self._version(original),
@@ -442,13 +540,29 @@ class Store:
                        "originalPath": str(self._version_path(original)), "originalSha256": original["sha256"],
                        "sources": json.loads(photo["sources"]), "projectSources": project.get("sources", []),
                        "preferences": project.get("preferences", {}), "comments": [self._comment(r) for r in rows],
+                       "history": {
+                           "versions": [{**self._version(r), **({"deletedAt": deleted_versions[r["id"]]}
+                                                                if r["id"] in deleted_versions else {})}
+                                        for r in history_versions],
+                           "comments": [{**self._comment(r), **({"deletedAt": deleted_versions[r["version_id"]]}
+                                                                if r["version_id"] in deleted_versions else {})}
+                                        for r in history_comments if r["id"] not in ids],
+                           "jobs": [{"jobId": r["id"], "baseVersionId": r["version_id"],
+                                     "createdAt": r["created_at"],
+                                     "workDir": str(self._managed(".review", "work", r["id"])),
+                                     "inputsPath": str(self._managed(".review", "work", r["id"], "inputs.json"))}
+                                    for r in history_jobs],
+                       },
                        "candidatePath": str(self._managed(".review", "work", job_id, "candidate" + base_path.suffix.lower()))}
             self._managed(".review", "work", job_id, "inputs.json").write_text(_json(payload), encoding="utf-8")
             return payload
 
     def export(self, directory=None):
         with self._db() as db:
-            rows = db.execute("SELECT v.*,p.category,p.scene FROM photos p JOIN versions v ON v.id=p.selected_id ORDER BY p.rowid").fetchall()
+            rows = db.execute("SELECT v.*,p.category,p.scene FROM photos p JOIN versions v ON v.id=p.selected_id "
+                              "WHERE p.id NOT IN (SELECT photo_id FROM tombstones WHERE version_id='') "
+                              "AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.photo_id=p.id AND t.version_id=v.id) "
+                              "ORDER BY p.rowid").fetchall()
             selected = [(row, self._version_path(row)) for row in rows]
             if not selected:
                 raise ValueError("Select at least one version before export")

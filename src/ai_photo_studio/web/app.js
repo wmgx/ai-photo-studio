@@ -9,6 +9,7 @@ let items = [],
   libraryRoot = "",
   codex = { model: "", reasoning_effort: "", requirements: "" },
   runs = [],
+  selectedAlbumJobId = "",
   albumGeneration = 0;
 let albumLoading = false,
   albumDialogMode = "open",
@@ -17,36 +18,33 @@ let albumLoading = false,
 let category = "全部",
   commentOnly = false,
   pendingOnly = false,
+  galleryScope = "planned",
   selected = 0,
   current = null,
   activeVersionId = null,
   compareVersionId = null;
-const revisionCountKey = "ai-photo-studio:latest-revision-count";
-let requestedRevisionCount = 2,
-  visibleRevisionIds = [],
+let visibleRevisionIds = [],
   comparisonCustomized = false;
-try {
-  const stored = Number(localStorage.getItem(revisionCountKey));
-  if (Number.isSafeInteger(stored) && stored > 0)
-    requestedRevisionCount = stored;
-} catch {}
 let token = "",
   mode = "triple",
   zoomed = false,
-  marking = false,
-  point = null,
+  points = [],
+  shownCommentId = null,
   requestId = null,
   writing = false,
   selectionSaving = false,
   exporting = false,
   submitting = false,
   accepting = false,
+  trashBusy = false,
+  trashAvailable = false,
+  multiPointAvailable = false,
   settingsSaving = false,
   timer;
 const statusNames = {
   saved: "已保存",
   open: "待处理",
-  running: "处理中",
+  running: "正在处理",
   ready: "待审阅",
   needs_input: "待补充",
   resolved: "已处理",
@@ -137,6 +135,158 @@ function setPreview(id, v) {
     img.removeAttribute("src");
   else img.src = mediaUrl(v);
 }
+const lightbox = {
+  fit: 1,
+  zoom: 1,
+  x: 0,
+  y: 0,
+  drag: null,
+  versionId: null,
+  marking: false,
+};
+function normalizePoints(value) {
+  return (Array.isArray(value) ? value : value ? [value] : [])
+    .filter((p) => p && [p.x, p.y].every((n) => Number.isFinite(n) && n >= 0 && n <= 1))
+    .map((p) => ({ x: p.x, y: p.y }));
+}
+function marksForVersion(id) {
+  const comment = comments.find((c) => c.id === shownCommentId);
+  if (comment) return comment.versionId === id ? normalizePoints(comment.point) : [];
+  return id === activeVersionId ? points : [];
+}
+function paintImagePins(layer, image, versionId) {
+  layer.replaceChildren();
+  const marks = marksForVersion(versionId), rect = image.getBoundingClientRect();
+  if (!marks.length || image.hidden || !image.naturalWidth || !rect.width || !rect.height) return;
+  // Object-fit may leave margins inside the image element. Use its actual picture area.
+  const scale = Math.min(rect.width / image.naturalWidth, rect.height / image.naturalHeight),
+    width = image.naturalWidth * scale, height = image.naturalHeight * scale,
+    origin = layer.getBoundingClientRect(),
+    left = rect.left - origin.left + (rect.width - width) / 2,
+    top = rect.top - origin.top + (rect.height - height) / 2;
+  marks.forEach((mark, index) => {
+    const pin = el("span", "pin", String(index + 1));
+    pin.setAttribute("aria-label", `标记 ${index + 1}`);
+    pin.style.left = `${left + mark.x * width}px`;
+    pin.style.top = `${top + mark.y * height}px`;
+    layer.append(pin);
+  });
+}
+function drawPreviewPoints() {
+  if (!current) return;
+  document.querySelectorAll(".version-panel").forEach((panel) => {
+    const image = panel.querySelector("img"), layer = panel.querySelector(".pins");
+    if (image && layer) paintImagePins(layer, image, panel.dataset.versionId);
+  });
+  paintImagePins($("afterPins"), $("afterImage"), activeVersionId);
+  paintImagePins($("beforePins"), $("beforeImage"), compareVersionId);
+  paintImagePins($("originalPins"), $("originalImage"), original(current)?.id);
+}
+function drawLightboxPoint() {
+  const sameVersion = lightbox.versionId === activeVersionId;
+  $("lightboxClearPoint").disabled = !sameVersion || !points.length;
+  $("lightboxUndoPoint").disabled = !sameVersion || !points.length;
+  if ($("imageLightbox").open) {
+    paintImagePins($("lightboxPins"), $("lightboxImage"), lightbox.versionId);
+    if (lightbox.marking && !$("lightboxImage").hidden)
+      $("lightboxStatus").textContent = points.length
+        ? `已标记 ${points.length} 处，可继续添加 · 点“写修改意见”返回`
+        : "点击添加编号标记 · 滚轮缩放 · 拖动画面定位";
+  }
+}
+function setLightboxMarking(enabled) {
+  if (enabled) {
+    setActiveVersion(lightbox.versionId);
+    shownCommentId = null;
+    showPoint();
+  }
+  lightbox.marking = enabled;
+  $("lightboxMark").setAttribute("aria-pressed", enabled);
+  $("lightboxStage").classList.toggle("mark-mode", enabled);
+  if (!$("lightboxImage").hidden)
+    $("lightboxStatus").textContent = enabled
+      ? "点击添加编号标记 · 滚轮缩放 · 拖动画面定位"
+      : "滚轮缩放 · 拖动画面查看细节";
+  drawLightboxPoint();
+}
+function lightboxBounds() {
+  const stage = $("lightboxStage"),
+    image = $("lightboxImage"),
+    width = image.naturalWidth * lightbox.fit * lightbox.zoom,
+    height = image.naturalHeight * lightbox.fit * lightbox.zoom,
+    maxX = Math.max(stage.clientWidth * 0.15, (width - stage.clientWidth) / 2 + 40),
+    maxY = Math.max(stage.clientHeight * 0.15, (height - stage.clientHeight) / 2 + 40);
+  // Keep some room to reposition a fitted image and inspect its edges.
+  lightbox.x = Math.max(-maxX, Math.min(maxX, lightbox.x));
+  lightbox.y = Math.max(-maxY, Math.min(maxY, lightbox.y));
+}
+function drawLightbox() {
+  const image = $("lightboxImage");
+  if (!image.naturalWidth) return;
+  lightboxBounds();
+  image.style.width = `${image.naturalWidth * lightbox.fit}px`;
+  image.style.height = `${image.naturalHeight * lightbox.fit}px`;
+  image.style.transform = `translate(${lightbox.x}px, ${lightbox.y}px) scale(${lightbox.zoom})`;
+  $("lightboxScale").textContent = `${Math.round(lightbox.fit * lightbox.zoom * 100)}%`;
+  drawLightboxPoint();
+}
+function fitLightbox(reset = false) {
+  const image = $("lightboxImage"), stage = $("lightboxStage");
+  if (!image.naturalWidth || !stage.clientWidth || !stage.clientHeight) return;
+  lightbox.fit = Math.min(stage.clientWidth * 0.82 / image.naturalWidth,
+    stage.clientHeight * 0.82 / image.naturalHeight, 1);
+  if (reset) {
+    lightbox.zoom = 1;
+    lightbox.x = lightbox.y = 0;
+  }
+  drawLightbox();
+}
+function zoomLightbox(next, clientX, clientY) {
+  const image = $("lightboxImage"), stage = $("lightboxStage");
+  if (image.hidden || !image.naturalWidth) return;
+  const previous = lightbox.zoom,
+    max = Math.max(16, 1 / lightbox.fit),
+    zoom = Math.max(0.25, Math.min(max, next)),
+    rect = stage.getBoundingClientRect(),
+    x = clientX === undefined ? rect.width / 2 : clientX - rect.left,
+    y = clientY === undefined ? rect.height / 2 : clientY - rect.top;
+  lightbox.x = x - rect.width / 2 -
+    (x - rect.width / 2 - lightbox.x) * (zoom / previous);
+  lightbox.y = y - rect.height / 2 -
+    (y - rect.height / 2 - lightbox.y) * (zoom / previous);
+  lightbox.zoom = zoom;
+  drawLightbox();
+}
+function openLightbox(item, annotate = false) {
+  if (!item || item.mediaType === "video") return;
+  const image = $("lightboxImage");
+  lightbox.zoom = lightbox.fit = 1;
+  lightbox.x = lightbox.y = 0;
+  lightbox.drag = null;
+  lightbox.versionId = item.id;
+  $("lightboxStage").classList.remove("is-dragging");
+  $("lightboxTitle").textContent = `${current?.scene || current?.id || "照片"} · ${label(item)}`;
+  $("lightboxStatus").textContent = "正在载入完整图片…";
+  $("lightboxScale").textContent = "—";
+  image.hidden = true;
+  $("lightboxMark").disabled = true;
+  $("lightboxWrite").disabled = true;
+  image.removeAttribute("src");
+  image.style.transform = "";
+  image.alt = `${label(item)}完整图片`;
+  $("imageLightbox").showModal();
+  setLightboxMarking(annotate);
+  image.src = mediaUrl(item, "version");
+  $("lightboxClose").focus({ preventScroll: true });
+}
+function closeLightbox() {
+  lightbox.drag = null;
+  lightbox.marking = false;
+  $("lightboxStage").classList.remove("is-dragging");
+  $("imageLightbox").close();
+  $("lightboxImage").removeAttribute("src");
+  $("fullSize").focus({ preventScroll: true });
+}
 function photoComments(id) {
   return comments.filter((c) => c.photoId === id);
 }
@@ -151,7 +301,7 @@ function storeDraft() {
   try {
     localStorage.setItem(
       draftKey(current.id, activeVersionId),
-      JSON.stringify({ text: $("commentText").value, point, requestId }),
+      JSON.stringify({ text: $("commentText").value, points, requestId }),
     );
   } catch {}
 }
@@ -163,20 +313,36 @@ function restoreDraft() {
     );
   } catch {}
   $("commentText").value = draft.text || "";
-  point = draft.point || null;
+  points = normalizePoints(draft.points ?? draft.point);
+  if (points.length) shownCommentId = null;
   requestId = draft.requestId || null;
   showPoint();
 }
 function showPoint() {
-  const has = !!point;
-  $("pin").hidden = !has;
+  const has = points.length > 0;
   $("locationRow").hidden = !has;
-  if (has) {
-    $("pin").style.left = point.x * 100 + "%";
-    $("pin").style.top = point.y * 100 + "%";
-    $("locationText").textContent =
-      `已标记：横向 ${Math.round(point.x * 100)}% · 纵向 ${Math.round(point.y * 100)}%`;
-  }
+  $("locationText").textContent = `已标记 ${points.length} 处，可在意见中引用编号`;
+  $("pointList").replaceChildren();
+  points.forEach((mark, index) => {
+    const remove = el("button", null, `${index + 1} ×`);
+    remove.type = "button";
+    remove.setAttribute("aria-label", `删除标记 ${index + 1}`);
+    remove.title = `横向 ${Math.round(mark.x * 100)}% · 纵向 ${Math.round(mark.y * 100)}%`;
+    remove.onclick = () => {
+      points.splice(index, 1);
+      shownCommentId = requestId = null;
+      showPoint();
+      storeDraft();
+    };
+    $("pointList").append(remove);
+  });
+  const comment = comments.find((c) => c.id === shownCommentId),
+    shown = comment ? normalizePoints(comment.point) : points,
+    markedVersion = comment?.versionId || activeVersionId;
+  $("markSummary").textContent = shown.length
+    ? `${label(version(current, markedVersion))} · ${comment ? "评论" : "草稿"}标记 ${shown.length} 处` : "";
+  drawPreviewPoints();
+  drawLightboxPoint();
 }
 function updateExportButtons() {
   const count = selectedPhotos().length;
@@ -210,11 +376,44 @@ function isPending(p) {
   const v = currentVersion(p);
   return v?.kind === "revision" && v.reviewStatus === "pending";
 }
+function photoJobState(photoId) {
+  const jobs = runs.filter((run) => run.photoId === photoId);
+  const run = jobs.find((item) => item.status === "running") ||
+    jobs.find((item) => item.status === "queued") || jobs[0];
+  const names = {
+    queued: "待处理",
+    running: "正在处理",
+    ready: "处理完成",
+    completed: "处理完成",
+    needs_input: "待补充信息",
+    failed: "处理失败",
+  };
+  return { label: names[run?.status] || "未提交", status: run?.status || "idle" };
+}
+function plannedPhotoIds() {
+  const run = runs.find((item) => item.jobId === selectedAlbumJobId);
+  const tasks = run?.plan?.tasks;
+  return new Set(Array.isArray(tasks) ? tasks.map((task) => task.photoId)
+    .filter((id) => items.some((photo) => photo.id === id)) : []);
+}
+function renderGalleryScope(ids) {
+  const available = ids.size > 0;
+  const showingPlanned = available && galleryScope === "planned";
+  $("galleryScopeStatus").textContent = available
+    ? `主 AI 选片 ${ids.size} / 全部 ${items.length} · 当前：${showingPlanned ? "主 AI 选片" : "全部"}`
+    : `主 AI 尚未选片 · 全部 ${items.length}`;
+  $("showPlanned").disabled = !available;
+  $("showPlanned").setAttribute("aria-pressed", showingPlanned);
+  $("showAll").setAttribute("aria-pressed", !showingPlanned);
+}
 function renderGrid(focus = false) {
   const old = filtered[selected]?.id,
-    q = $("search").value.trim().toLowerCase();
+    q = $("search").value.trim().toLowerCase(),
+    planned = plannedPhotoIds(),
+    showPlanned = planned.size > 0 && galleryScope === "planned";
   filtered = items.filter(
     (p) =>
+      (!showPlanned || planned.has(p.id)) &&
       (category === "全部" || p.category === category) &&
       (!commentOnly || photoComments(p.id).length) &&
       (!pendingOnly || isPending(p)) &&
@@ -222,6 +421,16 @@ function renderGrid(focus = false) {
   );
   let next = filtered.findIndex((p) => p.id === old);
   selected = next < 0 ? 0 : next;
+  renderGalleryScope(planned);
+  if ($("viewer").open && current) {
+    const currentIndex = filtered.findIndex((p) => p.id === current.id);
+    $("position").textContent = currentIndex < 0
+      ? "当前照片不在筛选结果中"
+      : `${currentIndex + 1} / ${filtered.length}`;
+    $("prev").disabled = currentIndex <= 0;
+    $("next").disabled = currentIndex < 0 || currentIndex === filtered.length - 1;
+    if (currentIndex >= 0) selected = currentIndex;
+  }
   $("grid").replaceChildren();
   filtered.forEach((p, i) => {
     const v = currentVersion(p),
@@ -253,6 +462,8 @@ function renderGrid(focus = false) {
       const chosen = version(p, p.selectedVersionId);
       card.append(el("span", "selection-badge", "已选 · " + label(chosen)));
     }
+    const job = photoJobState(p.id);
+    card.append(el("span", `job-status job-${job.status}`, job.label));
     if (isPending(p)) card.append(el("span", "review-badge", "待审阅"));
     const count = photoComments(p.id).length;
     if (count) card.append(el("span", "comment-count", count + " 条评论"));
@@ -303,8 +514,8 @@ function selectCard(i, focus) {
 function defaultCompare(p, v) {
   const base = original(p);
   return (
-    version(p, v.parentId) ||
     (base?.id !== v.id ? base : null) ||
+    (currentVersion(p)?.id !== v.id ? currentVersion(p) : null) ||
     p.versions.find((x) => x.id !== v.id)
   );
 }
@@ -317,7 +528,7 @@ function changeDescription(v) {
 }
 function shownRevisions() {
   const all = revisions(current),
-    count = Math.min(requestedRevisionCount, all.length),
+    count = Math.min(2, all.length),
     allowed = new Set(all.map((item) => item.id));
   if (!comparisonCustomized) {
     visibleRevisionIds = count ? all.slice(-count).map((item) => item.id) : [];
@@ -347,8 +558,8 @@ function showActiveInComparison() {
   }
 }
 function renderComparisonPanels() {
-  const base = original(current),
-    shown = shownRevisions();
+  const base = original(current);
+  shownRevisions();
   const displayed = [
       base,
       ...visibleRevisionIds.map((id) => version(current, id)),
@@ -358,13 +569,6 @@ function renderComparisonPanels() {
   container.style.minWidth =
     `${displayed.length * 280 + Math.max(0, displayed.length - 1) * 14 + 32}px`;
   container.replaceChildren();
-  $("revisionCount").value = String(requestedRevisionCount);
-  $("revisionCountHint").textContent =
-    `原图 + ${shown.length}/${requestedRevisionCount} 张修订` +
-    (active()?.kind !== "original" &&
-    !visibleRevisionIds.includes(activeVersionId)
-      ? ` · 评论版本：${label(active())}`
-      : "");
   for (let index = 0; index < displayed.length; index++) {
     const item = displayed[index],
       panel = el("figure", "version-panel"),
@@ -404,17 +608,31 @@ function renderComparisonPanels() {
       img.src = mediaUrl(item);
       img.alt = `${label(item)}完整画面`;
       img.draggable = false;
-      media.append(img);
+      img.onload = drawPreviewPoints;
+      media.append(img, el("div", "pins"));
+      media.classList.add("enlargeable");
+      media.tabIndex = 0;
+      media.setAttribute("role", "button");
+      media.setAttribute("aria-label", `全屏查看${label(item)}`);
+      media.onclick = () => openLightbox(item);
+      media.onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openLightbox(item);
+        }
+      };
     }
     if (item.id !== activeVersionId) {
       const activate = el("button", "panel-activate", "在这版留意见");
       activate.type = "button";
-      activate.onclick = () => setActiveVersion(item.id);
+      activate.onclick = () => item.mediaType === "video"
+        ? setActiveVersion(item.id) : openLightbox(item, true);
       caption.append(activate);
     }
     panel.append(caption, media, note);
     container.append(panel);
   }
+  requestAnimationFrame(drawPreviewPoints);
 }
 function populateVersions() {
   const v = active(),
@@ -425,7 +643,8 @@ function populateVersions() {
     const opt = el(
       "option",
       null,
-      label(item) + (item.id === current.currentVersionId ? " · 当前" : ""),
+      label(item) + (item.id === current.currentVersionId ? " · 当前" : "") +
+        (item.reviewStatus === "approved" ? " · 已通过" : ""),
     );
     opt.value = item.id;
     select.append(opt);
@@ -460,7 +679,8 @@ function populateVersions() {
       ? `${label(base)} + ${visibleRevisionIds.length} 张修订`
       : `${label(version(current, compareVersionId) || base)} · ${label(v)}`;
   $("fullSize").href = mediaUrl(v, "version");
-  $("fullSize").textContent = `全尺寸 · ${label(v)} ↗`;
+  $("fullSize").textContent = v.mediaType === "video"
+    ? `全尺寸 · ${label(v)} ↗` : `全屏查看 · ${label(v)}`;
   const video = v.mediaType === "video";
   $("video").pause();
   $("video").removeAttribute("src");
@@ -468,10 +688,7 @@ function populateVersions() {
   $("photoMeta").textContent =
     `${current.id} · ${label(v)} · ${current.category || ""} · ${dimensions(v)}${v.reviewStatus === "approved" ? " · 已通过" : v.kind === "revision" ? " · 待审阅" : ""}`;
   $("commentFormTitle").textContent = `${label(v)} · 修改意见`;
-  $("acceptVersion").hidden =
-    v.kind !== "revision" || v.reviewStatus === "approved";
-  $("acceptVersion").disabled = false;
-  $("acceptVersion").textContent = "通过当前版本";
+  renderVersionActions();
   $("sources").replaceChildren();
   for (const source of current.sources || [])
     $("sources").append(el("div", null, source));
@@ -484,7 +701,7 @@ function renderSelection() {
     selectedVersion = version(current, current.selectedVersionId);
   const box = $("selectionChoices");
   box.replaceChildren();
-  const choose = el("button", null, "选择当前版本 · " + label(v));
+  const choose = el("button", null, "选为交付版本 · " + label(v));
   choose.type = "button";
   choose.disabled =
     selectionSaving || exporting || current.selectedVersionId === v.id;
@@ -500,18 +717,23 @@ function renderSelection() {
     : "未选择，不会导出";
 }
 function renderRuns() {
+  renderVersionActions();
   if (!current) {
     $("runStatus").textContent = "";
+    $("photoJobStatus").textContent = "";
     return;
   }
+  const job = photoJobState(current.id);
+  $("photoJobStatus").textContent = job.label;
+  $("photoJobStatus").className = `job-status job-${job.status}`;
   const mine = runs.filter((r) => r.photoId === current.id).slice(0, 3);
   const names = {
-    queued: "排队中",
-    running: "Codex 正在处理",
-    ready: "已生成新版本，待审阅",
+    queued: "待处理",
+    running: "正在处理",
+    ready: "处理完成，待审阅",
     needs_input: "需要补充信息",
     failed: "处理失败",
-    completed: "已完成",
+    completed: "处理完成",
   };
   $("runStatus").textContent = mine
     .map(
@@ -520,6 +742,89 @@ function renderRuns() {
     )
     .join("\n");
 }
+function albumRunName(run) {
+  const time = run.startedAt ? new Date(run.startedAt) : null;
+  const date = time && !Number.isNaN(time.getTime())
+    ? time.toLocaleString("zh-CN", { hour12: false })
+    : "整册任务";
+  const stage = ({
+    queued: "等待主 AI", running: run.phase === "processing" ? "子任务处理中" : "主 AI 判断中",
+    ready: "已完成", needs_input: "待补充", failed: "处理失败",
+  }[run.status] || run.status);
+  return `${date} · ${stage}`;
+}
+function renderAlbumPlan() {
+  const root = $("albumPlan");
+  const history = runs.filter((run) => run.kind === "album");
+  root.hidden = !albumId || !history.length;
+  if (root.hidden) {
+    $("albumPlanBody").replaceChildren();
+    $("albumPlanStatus").textContent = "";
+    renderGrid();
+    return;
+  }
+  if (!history.some((run) => run.jobId === selectedAlbumJobId)) {
+    selectedAlbumJobId = history[0].jobId;
+    galleryScope = "planned";
+  }
+  renderGrid();
+  const choices = $("albumPlanSelect");
+  choices.replaceChildren();
+  for (const run of history) {
+    const option = el("option", null, albumRunName(run));
+    option.value = run.jobId;
+    choices.append(option);
+  }
+  choices.value = selectedAlbumJobId;
+  const run = history.find((item) => item.jobId === selectedAlbumJobId);
+  const body = $("albumPlanBody");
+  body.replaceChildren();
+  const tasks = Array.isArray(run.plan?.tasks) ? run.plan.tasks : null;
+  const childRuns = runs.filter((item) =>
+    item.albumJobId === run.jobId || (run.childJobIds || []).includes(item.jobId),
+  );
+  const finished = childRuns.filter((item) =>
+    ["ready", "needs_input", "failed"].includes(item.status),
+  ).length;
+  const status = {
+    queued: "等待主 AI 分析相册",
+    running: run.phase === "processing" ? "子 AI 正在处理" : "主 AI 正在判断处理方式",
+    ready: "整册任务已完成",
+    needs_input: "需要补充信息",
+    failed: "整册任务失败",
+  }[run.status] || run.status;
+  const progress = tasks
+    ? ` · ${tasks.length} 个子任务` +
+      (run.childJobIds?.length ? ` · 已处理 ${finished}/${run.childJobIds.length}` : "")
+    : "";
+  $("albumPlanStatus").textContent = status + progress;
+  if (run.error || (run.reply && run.reply !== run.plan?.summary))
+    body.append(el("p", run.error ? "error" : "quiet", run.error || run.reply));
+  if (!run.plan) {
+    if (["queued", "running"].includes(run.status))
+      body.append(el("p", "quiet", "主 AI 的处理方案会在分析完成后显示。"));
+    return;
+  }
+  if (run.plan.summary) {
+    body.append(el("p", "album-plan-summary", run.plan.summary));
+  }
+  if (run.skipped?.length)
+    body.append(el("p", "quiet", `未启动修图 ${run.skipped.length} 张：` +
+      run.skipped.map((item) => `${item.photoId}（${item.reason}）`).join("、")));
+}
+$("albumPlanSelect").onchange = () => {
+  selectedAlbumJobId = $("albumPlanSelect").value;
+  galleryScope = "planned";
+  renderAlbumPlan();
+};
+$("showPlanned").onclick = () => {
+  galleryScope = "planned";
+  renderGrid();
+};
+$("showAll").onclick = () => {
+  galleryScope = "all";
+  renderGrid();
+};
 async function saveSelection(versionId) {
   if (selectionSaving || exporting || !current) return;
   const photoId = current.id;
@@ -542,23 +847,55 @@ async function saveSelection(versionId) {
     updateExportButtons();
   }
 }
+function mainAiComments(photo) {
+  const notes = [];
+  for (const run of runs) {
+    if (run.kind !== "album") continue;
+    const task = run.plan?.tasks?.find((item) => item.photoId === photo.id);
+    if (!task) continue;
+    const child = runs.find((item) => item.photoId === photo.id &&
+      (item.albumJobId === run.jobId || run.childJobIds?.includes(item.jobId)));
+    const skipped = run.skipped?.find((item) => item.photoId === photo.id);
+    notes.push({ run, task, child, skipped });
+  }
+  return notes;
+}
+function renderMainAiComment(note) {
+  const { run, task, child, skipped } = note;
+  const block = el("article", "comment-item main-ai-comment");
+  block.append(el("strong", null, "主 AI 修图要求"));
+  const state = skipped ? "未启动" : ({
+    queued: "等待处理", running: "处理中", ready: "待审阅",
+    needs_input: "待补充", failed: "处理失败",
+  }[child?.status] || "待安排");
+  block.append(el("span", "status", state));
+  const base = version(current, child?.versionId);
+  const result = version(current, child?.resultVersionId);
+  const time = new Date(run.startedAt).toLocaleString("zh-CN", { hour12: false });
+  block.append(el("p", "quiet", `${time}${base ? " · 对应版本：" + label(base) : " · 相册任务"}${result ? " → " + label(result) : ""}`));
+  block.append(el("p", "comment-text", task.instructions || "未记录具体要求"));
+  const references = (task.referenceIds || []).map((id) => {
+    const photo = items.find((item) => item.id === id);
+    return photo?.sources?.[0]?.split(/[\\/]/).at(-1) || id;
+  });
+  if (references.length)
+    block.append(el("p", "comment-text", "参考素材：" + references.join("、")));
+  if (base && base.id !== activeVersionId) {
+    const button = el("button", null, "查看要求对应版本 · " + label(base));
+    button.onclick = () => setActiveVersion(base.id);
+    block.append(button);
+  }
+  if (skipped || child?.error)
+    block.append(el("div", "reply", skipped?.reason || child.error));
+  return block;
+}
 function renderComments() {
   if (!current) return;
-  const rows = photoComments(current.id),
-    local = rows.filter((c) => c.versionId === activeVersionId),
-    from = rows.filter(
-      (c) =>
-        c.resultVersionId === activeVersionId &&
-        c.versionId !== activeVersionId,
-    ),
-    other = rows.filter(
-      (c) =>
-        c.versionId !== activeVersionId &&
-        c.resultVersionId !== activeVersionId,
-    );
-  $("commentHeading").textContent = `本版评论 · ${local.length}`;
+  const rows = photoComments(current.id);
+  const mainAiNotes = mainAiComments(current);
+  $("commentHeading").textContent = `修图要求与评论 · ${rows.length + mainAiNotes.length}`;
   $("comments").replaceChildren();
-  if (!rows.length)
+  if (!rows.length && !mainAiNotes.length)
     $("comments").append(
       el("p", "quiet", "还没有评论。你的第一条意见会留在这里。"),
     );
@@ -575,6 +912,8 @@ function renderComments() {
         minute: "2-digit",
       }),
     );
+    const commentRun = c.status === "running"
+      ? runs.find((run) => run.commentIds?.includes(c.id)) : null;
     block.append(
       time,
       el(
@@ -584,7 +923,7 @@ function renderComments() {
           ? "本版处理意见 · "
           : group === "other"
             ? "其他版本 · "
-            : "") + (statusNames[c.status] || c.status),
+            : "") + (commentRun?.status === "queued" ? "待处理" : statusNames[c.status] || c.status),
       ),
       el("p", "comment-text", c.text),
     );
@@ -597,14 +936,16 @@ function renderComments() {
       b.onclick = () => setActiveVersion(c.versionId);
       block.append(b);
     }
-    if (c.point) {
-      const b = el("button", null, "查看标记位置");
+    const commentPoints = normalizePoints(c.point);
+    if (commentPoints.length) {
+      const b = el("button", null, `查看 ${commentPoints.length} 处标记`);
       b.onclick = () => {
         if (c.versionId !== activeVersionId) setActiveVersion(c.versionId);
-        point = { x: c.point.x, y: c.point.y };
-        setMode("compare");
-        $("split").value = 0;
-        updateSplit();
+        shownCommentId = c.id;
+        shownRevisions();
+        showActiveInComparison();
+        renderComparisonPanels();
+        setMode("triple");
         showPoint();
         toast("正在显示这条评论的标记");
       };
@@ -624,6 +965,7 @@ function renderComments() {
           const updated = await api("/api/submit", { id: c.id });
           upsertComment(updated);
           renderComments();
+          await refresh();
           toast(
             updated.status === "failed"
               ? updated.reply || "启动失败"
@@ -640,14 +982,18 @@ function renderComments() {
     }
     $("comments").append(block);
   }
-  local.forEach((c) => addRow(c, "local"));
-  if (from.length) {
-    $("comments").append(el("h2", null, "本版处理意见"));
-    from.forEach((c) => addRow(c, "from"));
-  }
-  if (other.length) {
-    $("comments").append(el("h2", null, "其他版本评论"));
-    other.forEach((c) => addRow(c, "other"));
+  const timeline = [
+    ...mainAiNotes.map((note) => ({ time: note.run.startedAt, note })),
+    ...rows.map((comment) => ({ time: comment.createdAt, comment })),
+  ].sort((a, b) => (Date.parse(b.time) || 0) - (Date.parse(a.time) || 0));
+  for (const entry of timeline) {
+    if (entry.note) {
+      $("comments").append(renderMainAiComment(entry.note));
+    } else {
+      const c = entry.comment;
+      addRow(c, c.versionId === activeVersionId ? "local" :
+        c.resultVersionId === activeVersionId ? "from" : "other");
+    }
   }
 }
 function upsertComment(c) {
@@ -660,7 +1006,9 @@ function setActiveVersion(id) {
   storeDraft();
   activeVersionId = id;
   compareVersionId = null;
-  point = null;
+  points = [];
+  shownCommentId = photoComments(current.id).findLast((c) =>
+    c.versionId === id && normalizePoints(c.point).length)?.id || null;
   requestId = null;
   $("formStatus").textContent = "";
   shownRevisions();
@@ -682,18 +1030,16 @@ function openPhoto(index, refreshed = false) {
   if (!samePhoto) {
     visibleRevisionIds = [];
     comparisonCustomized = false;
+    shownCommentId = null;
   }
   current = p;
   activeVersionId = version(p, retained) ? retained : currentVersion(p)?.id;
   compareVersionId = oldCompare;
-  if (samePhoto) {
-    shownRevisions();
-    showActiveInComparison();
-  }
   selected = index;
   zoomed = false;
-  marking = false;
-  point = null;
+  points = [];
+  if (!samePhoto) shownCommentId = photoComments(p.id).findLast((c) =>
+    c.versionId === activeVersionId && normalizePoints(c.point).length)?.id || null;
   requestId = null;
   $("zoom").textContent = "放大 2×";
   $("photoTitle").textContent = p.scene || p.id;
@@ -717,8 +1063,6 @@ function openPhoto(index, refreshed = false) {
 function setMode(next) {
   if (!current) return;
   mode = next;
-  marking = false;
-  $("mark").setAttribute("aria-pressed", "false");
   const v = active(),
     isVideo = v.mediaType === "video",
     canCompare = !!compareVersionId && compareVersionId !== v.id;
@@ -728,7 +1072,6 @@ function setMode(next) {
   $("originalFrame").hidden = isVideo || mode !== "original";
   $("video").hidden = !isVideo;
   $("compareControls").hidden = isVideo;
-  $("revisionControls").hidden = isVideo || mode !== "triple";
   $("sourceSelect").hidden =
     isVideo || mode !== "compare" || !$("sourceSelect").options.length;
   $("split").hidden =
@@ -753,7 +1096,6 @@ function setMode(next) {
     mode === "triple"
       ? `${label(original(current))} + ${visibleRevisionIds.length} 张修订`
       : `${label(version(current, compareVersionId) || original(current))} · ${label(v)}`;
-  $("picture").classList.remove("mark-mode");
   fitImage();
 }
 function fitImage() {
@@ -771,6 +1113,7 @@ function fitImage() {
     Math.max(1, viewport.clientWidth - 32) + "px";
   $("originalFrame").style.height =
     Math.max(1, viewport.clientHeight - 32) + "px";
+  drawPreviewPoints();
 }
 function updateSplit() {
   const v = Number($("split").value);
@@ -779,8 +1122,13 @@ function updateSplit() {
   $("beforeLabel").style.opacity = v < 12 ? "0" : "1";
   $("divider").hidden = v === 0 || v === 100 || !compareVersionId;
 }
-async function save(submit) {
+async function save() {
   if (writing || !current) return;
+  if (points.length > 1 && !multiPointAvailable) {
+    toast("多点标记需等待服务更新后提交，草稿已保留");
+    storeDraft();
+    return;
+  }
   const value = $("commentText").value,
     text = value.trim();
   if (!text) {
@@ -788,12 +1136,12 @@ async function save(submit) {
     return;
   }
   writing = true;
-  $("submitComment").disabled = $("saveComment").disabled = true;
+  $("submitComment").disabled = true;
   $("formStatus").className = "";
-  $("formStatus").textContent = submit ? "正在保存并提交…" : "正在保存…";
+  $("formStatus").textContent = "正在提交修改…";
   const photoId = current.id,
     versionId = activeVersionId,
-    commentPoint = point,
+    commentPoint = points.length ? (multiPointAvailable ? points.map((p) => ({ ...p })) : points[0]) : null,
     id = requestId || crypto.randomUUID(),
     key = draftKey(photoId, versionId);
   requestId = id;
@@ -805,7 +1153,7 @@ async function save(submit) {
       versionId,
       text,
       point: commentPoint,
-      submit,
+      submit: true,
     });
     upsertComment(result);
     if (
@@ -820,20 +1168,19 @@ async function save(submit) {
     if (current?.id === photoId && activeVersionId === versionId) {
       if ($("commentText").value === value) {
         $("commentText").value = "";
-        point = null;
+        points = [];
+        shownCommentId = result.id;
         requestId = null;
         showPoint();
       }
-      $("formStatus").textContent =
-        result.status === "failed"
-          ? result.reply || "启动失败，可在评论中重试"
-          : submit
-            ? "已提交修改意见"
-            : "评论已保存";
+      $("formStatus").textContent = result.status === "failed"
+        ? result.reply || "启动失败，可在评论中重试"
+        : "已提交修改意见";
       $("formStatus").className = result.status === "failed" ? "error" : "";
       renderComments();
     }
     renderGrid();
+    await refresh();
   } catch (error) {
     if (current?.id === photoId && activeVersionId === versionId) {
       $("formStatus").textContent = error.message + "，输入内容仍保留。";
@@ -843,18 +1190,17 @@ async function save(submit) {
       try {
         localStorage.setItem(
           key,
-          JSON.stringify({ text: value, point: commentPoint, requestId: id }),
+          JSON.stringify({ text: value, points: normalizePoints(commentPoint), requestId: id }),
         );
       } catch {}
   } finally {
     writing = false;
-    $("submitComment").disabled = $("saveComment").disabled = false;
+    $("submitComment").disabled = false;
   }
 }
 async function acceptCurrent() {
   if (
-    !current ||
-    active()?.kind !== "revision" ||
+    !current || accepting || trashBusy ||
     active().reviewStatus === "approved"
   )
     return;
@@ -873,14 +1219,103 @@ async function acceptCurrent() {
       renderSelection();
     }
     renderGrid();
+    await refresh();
     toast("已通过 " + label(approved));
   } catch (error) {
     toast(error.message);
     $("acceptVersion").disabled = false;
   } finally {
     accepting = false;
+    renderVersionActions();
   }
 }
+function renderVersionActions() {
+  const v = active();
+  $("openTrash").disabled = !albumId || !trashAvailable || albumLoading || trashBusy;
+  if (!v) return;
+  const running = runs.some((run) => run.photoId === current.id &&
+    ["queued", "running"].includes(run.status));
+  const busy = trashBusy || writing || accepting || selectionSaving || exporting;
+  $("acceptVersion").disabled = busy || v.reviewStatus === "approved";
+  $("acceptVersion").textContent = v.reviewStatus === "approved" ? "此版本已通过" : "通过此版本 · " + label(v);
+  $("deleteVersion").disabled = !trashAvailable || busy || running || v.kind === "original";
+  $("deletePhoto").disabled = !trashAvailable || busy || running;
+  $("versionActionHint").textContent = !trashAvailable
+    ? "服务更新后可使用删除和回收站。"
+    : running ? "这张照片正在排队或处理，完成后可删除。"
+    : "删除后可从相册回收站恢复；原片不能单独删除。";
+}
+async function trashCurrent(wholePhoto) {
+  if (!current || !trashAvailable || trashBusy || writing || accepting || selectionSaving || exporting) return;
+  const photoId = current.id, v = active();
+  const name = wholePhoto ? `整张照片“${current.scene || photoId}”及其全部版本` : `版本“${label(v)}”`;
+  if (!confirm(`将${name}移入回收站？\n可以恢复；若已选为交付，将取消该选择。原始文件不会删除。`)) return;
+  trashBusy = true;
+  renderVersionActions();
+  try {
+    await api("/api/trash", { photoId, ...(wholePhoto ? {} : { versionId: v.id }) });
+    if (wholePhoto && current?.id === photoId) closeViewer();
+    else comparisonCustomized = false;
+    await refresh();
+    toast("已移入回收站");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    trashBusy = false;
+    renderVersionActions();
+  }
+}
+async function renderTrash() {
+  const list = $("trashList");
+  const entries = await api("/api/trash");
+  list.replaceChildren();
+  if (!entries.length) list.append(el("p", "quiet", "回收站为空"));
+  for (const entry of entries) {
+    const row = el("article", "trash-item"), detail = el("div");
+    detail.append(el("strong", null, entry.scene || entry.photoId),
+      el("p", "quiet", `${entry.kind === "photo" ? "整张照片及全部版本" : "修订版 · " + entry.label} · ${new Date(entry.deletedAt).toLocaleString("zh-CN")}`));
+    const restore = el("button", null, entry.kind === "photo" ? "恢复照片" : "恢复版本");
+    restore.onclick = async () => {
+      if (trashBusy) return;
+      trashBusy = true;
+      list.querySelectorAll("button").forEach((button) => button.disabled = true);
+      $("closeTrash").disabled = true;
+      $("trashStatus").textContent = "正在恢复…";
+      try {
+        await api("/api/restore", { photoId: entry.photoId, ...(entry.versionId ? { versionId: entry.versionId } : {}) });
+        await refresh();
+        await renderTrash();
+        $("trashStatus").textContent = "已恢复。交付选择保持当前设置，可自行重新选择。";
+      } catch (error) {
+        $("trashStatus").textContent = error.message;
+      } finally {
+        trashBusy = false;
+        list.querySelectorAll("button").forEach((button) => button.disabled = false);
+        $("closeTrash").disabled = false;
+        renderVersionActions();
+      }
+    };
+    row.append(detail, restore);
+    list.append(row);
+  }
+}
+$("deleteVersion").onclick = () => trashCurrent(false);
+$("deletePhoto").onclick = () => trashCurrent(true);
+$("openTrash").onclick = async () => {
+  $("trashDialog").showModal();
+  $("trashStatus").textContent = "正在读取…";
+  $("trashList").replaceChildren();
+  try {
+    await renderTrash();
+    $("trashStatus").textContent = "";
+  } catch (error) {
+    $("trashStatus").textContent = error.message;
+  }
+};
+$("closeTrash").onclick = () => $("trashDialog").close();
+$("trashDialog").addEventListener("cancel", (e) => {
+  if (trashBusy) e.preventDefault();
+});
 function closeViewer() {
   storeDraft();
   $("video").pause();
@@ -941,6 +1376,118 @@ $("exportForm").onsubmit = async (e) => {
   }
 };
 $("closeViewer").onclick = closeViewer;
+$("fullSize").onclick = (e) => {
+  if (active()?.mediaType === "video") return;
+  e.preventDefault();
+  openLightbox(active());
+};
+$("originalFrame").onclick = () => openLightbox(original(current));
+$("originalFrame").onkeydown = (e) => {
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    openLightbox(original(current));
+  }
+};
+$("originalFrame").tabIndex = 0;
+$("originalFrame").setAttribute("role", "button");
+$("originalFrame").setAttribute("aria-label", "全屏查看原始构图");
+$("lightboxImage").onload = () => {
+  $("lightboxImage").hidden = false;
+  $("lightboxMark").disabled = false;
+  $("lightboxWrite").disabled = false;
+  setLightboxMarking(lightbox.marking);
+  fitLightbox(true);
+};
+$("lightboxImage").onerror = () => {
+  $("lightboxImage").hidden = true;
+  $("lightboxStatus").textContent = "完整图片载入失败";
+};
+$("lightboxClose").onclick = closeLightbox;
+$("imageLightbox").addEventListener("cancel", (e) => {
+  e.preventDefault();
+  closeLightbox();
+});
+$("lightboxMinus").onclick = () => zoomLightbox(lightbox.zoom / 1.25);
+$("lightboxPlus").onclick = () => zoomLightbox(lightbox.zoom * 1.25);
+$("lightboxFit").onclick = () => fitLightbox(true);
+$("lightboxActual").onclick = () => zoomLightbox(1 / lightbox.fit);
+$("lightboxMark").onclick = () => setLightboxMarking(!lightbox.marking);
+$("lightboxWrite").onclick = () => {
+  setActiveVersion(lightbox.versionId);
+  shownCommentId = null;
+  showPoint();
+  closeLightbox();
+  $("commentText").focus();
+};
+$("lightboxClearPoint").onclick = () => {
+  points = [];
+  shownCommentId = requestId = null;
+  showPoint();
+  storeDraft();
+};
+$("lightboxUndoPoint").onclick = () => {
+  points.pop();
+  shownCommentId = requestId = null;
+  showPoint();
+  storeDraft();
+};
+$("lightboxStage").addEventListener("wheel", (e) => {
+  if (!$("imageLightbox").open) return;
+  e.preventDefault();
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? $("lightboxStage").clientHeight : 1,
+    delta = Math.max(-100, Math.min(100, e.deltaY * unit));
+  if (!delta) return;
+  zoomLightbox(lightbox.zoom * Math.exp(-delta * (e.ctrlKey ? 0.01 : 0.0015)),
+    e.clientX, e.clientY);
+}, { passive: false });
+$("lightboxStage").onpointerdown = (e) => {
+  if (e.button !== 0 || !e.isPrimary || $("lightboxImage").hidden) return;
+  e.preventDefault();
+  lightbox.drag = { id: e.pointerId, x: e.clientX, y: e.clientY,
+    startX: e.clientX, startY: e.clientY, moved: false };
+  $("lightboxStage").classList.add("is-dragging");
+  $("lightboxStage").setPointerCapture(e.pointerId);
+};
+$("lightboxStage").onpointermove = (e) => {
+  if (lightbox.drag?.id !== e.pointerId) return;
+  if (!lightbox.drag.moved && Math.hypot(e.clientX - lightbox.drag.startX,
+    e.clientY - lightbox.drag.startY) < 6) return;
+  lightbox.drag.moved = true;
+  lightbox.x += e.clientX - lightbox.drag.x;
+  lightbox.y += e.clientY - lightbox.drag.y;
+  lightbox.drag.x = e.clientX;
+  lightbox.drag.y = e.clientY;
+  drawLightbox();
+};
+$("lightboxStage").onpointerup = $("lightboxStage").onpointercancel =
+$("lightboxStage").onlostpointercapture = (e) => {
+  if (lightbox.drag?.id !== e.pointerId) return;
+  const mark = e.type === "pointerup" && !lightbox.drag.moved && lightbox.marking;
+  lightbox.drag = null;
+  $("lightboxStage").classList.remove("is-dragging");
+  if ($("lightboxStage").hasPointerCapture(e.pointerId))
+    $("lightboxStage").releasePointerCapture(e.pointerId);
+  if (mark) {
+    const rect = $("lightboxImage").getBoundingClientRect(),
+      x = (e.clientX - rect.left) / rect.width,
+      y = (e.clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return;
+    points.push({ x, y });
+    shownCommentId = requestId = null;
+    showPoint();
+    storeDraft();
+  }
+};
+$("lightboxStage").ondblclick = (e) => {
+  if (lightbox.marking) return;
+  zoomLightbox(lightbox.zoom < 2 ? 2 : 1, e.clientX, e.clientY);
+};
+new ResizeObserver(() => {
+  if ($("imageLightbox").open) fitLightbox();
+}).observe($("lightboxStage"));
+for (const id of ["afterImage", "beforeImage", "originalImage"])
+  $(id).onload = drawPreviewPoints;
+new ResizeObserver(drawPreviewPoints).observe($("viewport"));
 $("viewer").addEventListener("cancel", (e) => {
   e.preventDefault();
   closeViewer();
@@ -953,21 +1500,15 @@ $("sourceSelect").onchange = () => {
   populateVersions();
   setMode(mode);
 };
-$("revisionCount").onchange = () => {
-  const value = Number($("revisionCount").value);
-  if (!Number.isSafeInteger(value) || value < 1) {
-    $("revisionCount").value = String(requestedRevisionCount);
-    return;
-  }
-  requestedRevisionCount = value;
-  comparisonCustomized = false;
-  try {
-    localStorage.setItem(revisionCountKey, String(value));
-  } catch {}
-  if (current) populateVersions();
-};
 $("tripleMode").onclick = () => setMode("triple");
-$("compareMode").onclick = () => setMode("compare");
+$("compareMode").onclick = () => {
+  setActiveVersion(currentVersion(current).id);
+  compareVersionId = defaultCompare(current, active())?.id || null;
+  populateVersions();
+  setMode("compare");
+  $("split").value = 50;
+  updateSplit();
+};
 $("originalMode").onclick = () => setMode("original");
 $("zoom").onclick = () => {
   zoomed = !zoomed;
@@ -976,20 +1517,10 @@ $("zoom").onclick = () => {
   fitImage();
 };
 $("split").oninput = updateSplit;
-$("mark").onclick = () => {
-  const next = !marking;
-  if (mode !== "compare" && active().mediaType !== "video") setMode("compare");
-  marking = next;
-  $("mark").setAttribute("aria-pressed", marking);
-  $("picture").classList.toggle("mark-mode", marking);
-  if (marking && mode === "compare") {
-    $("split").value = 0;
-    updateSplit();
-    toast("点击当前版本画面中想修改的位置");
-  }
-};
+$("mark").onclick = () => openLightbox(active(), true);
 $("clearPoint").onclick = () => {
-  point = null;
+  points = [];
+  shownCommentId = requestId = null;
   showPoint();
   storeDraft();
 };
@@ -999,33 +1530,21 @@ $("commentText").oninput = () => {
 };
 $("commentForm").onsubmit = (e) => {
   e.preventDefault();
-  save(true);
+  save();
 };
-$("saveComment").onclick = () => save(false);
 $("acceptVersion").onclick = acceptCurrent;
-let dragging = false;
+let dragging = null;
 $("picture").onpointerdown = (e) => {
-  const r = $("picture").getBoundingClientRect(),
-    x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
-    y = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height));
-  if (marking) {
-    e.preventDefault();
-    point = { x, y };
-    marking = false;
-    $("mark").setAttribute("aria-pressed", "false");
-    $("picture").classList.remove("mark-mode");
-    showPoint();
-    storeDraft();
-    $("commentText").focus();
-    return;
-  }
-  dragging = true;
+  if (e.button !== 0) return;
+  dragging = { startX: e.clientX, startY: e.clientY,
+    split: Number($("split").value), moved: false };
   $("picture").setPointerCapture(e.pointerId);
-  $("split").value = x * 100;
-  updateSplit();
 };
 $("picture").onpointermove = (e) => {
   if (!dragging) return;
+  if (!dragging.moved && Math.hypot(e.clientX - dragging.startX,
+    e.clientY - dragging.startY) < 6) return;
+  dragging.moved = true;
   const r = $("picture").getBoundingClientRect();
   $("split").value = Math.max(
     0,
@@ -1033,8 +1552,16 @@ $("picture").onpointermove = (e) => {
   );
   updateSplit();
 };
-$("picture").onpointerup = () => (dragging = false);
-$("picture").onpointercancel = () => (dragging = false);
+$("picture").onpointerup = (e) => {
+  if (dragging && !dragging.moved) {
+    const r = $("picture").getBoundingClientRect(),
+      x = ((e.clientX - r.left) / r.width) * 100,
+      before = version(current, compareVersionId) || original(current);
+    openLightbox(x <= dragging.split ? before : active());
+  }
+  dragging = null;
+};
+$("picture").onpointercancel = () => (dragging = null);
 $("commentFilter").onclick = () => {
   commentOnly = !commentOnly;
   $("commentFilter").setAttribute("aria-pressed", commentOnly);
@@ -1047,16 +1574,21 @@ $("pendingFilter").onclick = () => {
 };
 $("search").oninput = () => renderGrid();
 document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.isComposing) return;
+  if (window.getSelection()?.isCollapsed === false) return;
+  if ($("imageLightbox").open) return;
   if (
     albumLoading ||
     $("albumDialog").open ||
     $("exportDialog").open ||
+    $("trashDialog").open ||
     $("settingsDialog").open
   ) return;
   if (e.target.matches("input,textarea,select,[contenteditable=true]")) return;
   if ($("viewer").open) {
     if (["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"].includes(e.key)) {
       e.preventDefault();
+      if (!filtered.some((photo) => photo.id === current?.id)) return;
       const n = selected + (["ArrowLeft", "ArrowUp"].includes(e.key) ? -1 : 1);
       if (n >= 0 && n < filtered.length) openPhoto(n);
     }
@@ -1090,13 +1622,15 @@ function renderAlbums() {
   const select = $("albumSelect");
   select.replaceChildren();
   for (const a of albums) {
-    const option = el("option", null, `${a.name} · ${a.count ?? 0} 项 — ${a.path || ""}`);
+    const count = a.id === albumId && !albumLoading ? items.length : (a.count ?? 0);
+    const option = el("option", null, `${a.name} · ${count} 项 — ${a.path || ""}`);
     option.value = a.id;
     select.append(option);
   }
   if (albumId) select.value = albumId;
   select.disabled = !albums.length || albumLoading;
   $("openSettings").disabled = !albumId || albumLoading;
+  renderVersionActions();
   $("albumPath").textContent = albums.find((a) => a.id === albumId)?.path ||
     (libraryRoot ? `照片根目录：${libraryRoot}` : "");
   if (!albums.length) {
@@ -1127,6 +1661,7 @@ async function openAlbum(id) {
     exporting ||
     submitting ||
     accepting ||
+    trashBusy ||
     settingsSaving
   ) {
     $("albumSelect").value = albumId;
@@ -1135,9 +1670,16 @@ async function openAlbum(id) {
   }
   if (!albums.some((a) => a.id === id)) return;
   const previous = albumId,
+    previousRuns = runs,
+    previousPlanJobId = selectedAlbumJobId,
+    previousGalleryScope = galleryScope,
     generation = ++albumGeneration;
   if (current) closeViewer();
   albumId = id;
+  runs = [];
+  selectedAlbumJobId = "";
+  galleryScope = "planned";
+  renderAlbumPlan();
   albumLoading = true;
   $("albumSelect").disabled = true;
   $("rescanAlbums").disabled = true;
@@ -1155,6 +1697,8 @@ async function openAlbum(id) {
     comments = await api("/api/comments");
     runs = data.runs || [];
     codex = data.codex || { model: "", reasoning_effort: "", requirements: "" };
+    trashAvailable = !!data.capabilities?.trash;
+    multiPointAvailable = !!data.capabilities?.multiPoint;
     if (generation !== albumGeneration) return;
     category = "全部";
     commentOnly = pendingOnly = false;
@@ -1172,9 +1716,14 @@ async function openAlbum(id) {
     );
     renderFilters();
     renderGrid();
+    renderAlbumPlan();
   } catch (error) {
     if (generation === albumGeneration) {
       albumId = previous;
+      runs = previousRuns;
+      selectedAlbumJobId = previousPlanJobId;
+      galleryScope = previousGalleryScope;
+      renderAlbumPlan();
       $("loadError").textContent = error.message;
       toast(error.message);
     }
@@ -1201,19 +1750,30 @@ async function refresh() {
     if (generation !== albumGeneration) return;
     token = data.token || token;
     project = data.project || project;
+    codex = data.codex || codex;
+    trashAvailable = !!data.capabilities?.trash;
+    multiPointAvailable = !!data.capabilities?.multiPoint;
+    renderVersionActions();
     const changed = JSON.stringify(data.items) !== JSON.stringify(items),
       commentsChanged = JSON.stringify(fresh) !== JSON.stringify(comments),
       runsChanged = JSON.stringify(newRuns) !== JSON.stringify(runs);
     if (changed) {
       const openId = current?.id;
       items = data.items;
+      renderAlbums();
       renderFilters();
       renderGrid();
+      renderAlbumPlan();
       if (openId) {
         const i = filtered.findIndex((p) => p.id === openId);
-        if (i >= 0) openPhoto(i, true);
+        if (!items.some((p) => p.id === openId)) closeViewer();
+        else if (i >= 0) openPhoto(i, true);
         else {
           current = items.find((p) => p.id === openId) || current;
+          if (!version(current, activeVersionId)) {
+            activeVersionId = currentVersion(current)?.id;
+            restoreDraft();
+          }
           populateVersions();
           renderSelection();
         }
@@ -1223,10 +1783,13 @@ async function refresh() {
       comments = fresh;
       renderGrid();
       renderComments();
+      showPoint();
     }
     if (runsChanged) {
       runs = newRuns;
       renderRuns();
+      renderAlbumPlan();
+      renderComments();
     }
   } catch {}
 }
@@ -1239,6 +1802,7 @@ function albumActionsBusy() {
     exporting ||
     submitting ||
     accepting ||
+    trashBusy ||
     settingsSaving
   );
 }
@@ -1381,8 +1945,10 @@ $("rescanAlbums").onclick = async () => {
       items = [];
       comments = [];
       runs = [];
+      selectedAlbumJobId = "";
       project = { name: "AI 修图工作台", root: "" };
       renderGrid();
+      renderAlbumPlan();
     }
     toast("目录已刷新");
   } catch (error) {
@@ -1393,46 +1959,63 @@ $("openSettings").onclick = () => {
   $("modelInput").value = codex.model || "";
   $("effortSelect").value = codex.reasoning_effort || "";
   $("requirementsInput").value = codex.requirements || "";
+  const concurrencyAvailable = Number.isInteger(codex.max_concurrency);
+  $("concurrencyInput").disabled = !concurrencyAvailable;
+  $("concurrencyInput").value = concurrencyAvailable ? codex.max_concurrency : 1;
+  $("concurrencyHint").textContent = concurrencyAvailable
+    ? "本相册默认同时运行 1 个 AI 任务，可设为 1–8。调低后，已开始的任务会继续完成；等待中的任务按新上限启动。"
+    : "当前修图结束后更新服务即可设置";
   $("settingsResult").textContent = "";
   $("settingsResult").classList.remove("error");
-  $("runAll").disabled = !$("requirementsInput").value.trim();
+  $("runAll").disabled = !$("requirementsInput").value.trim() || !items.length;
   $("settingsDialog").showModal();
   $("requirementsInput").focus();
 };
 $("closeSettings").onclick = () => $("settingsDialog").close();
 $("requirementsInput").oninput = () => {
-  $("runAll").disabled = settingsSaving || !$("requirementsInput").value.trim();
+  $("runAll").disabled = settingsSaving || !$("requirementsInput").value.trim() || !items.length;
 };
 async function saveAlbumSettings(runAll) {
   if (settingsSaving) return;
+  const settings = {
+    model: $("modelInput").value.trim(),
+    reasoning_effort: $("effortSelect").value,
+    requirements: $("requirementsInput").value.trim(),
+  };
+  if (!$("concurrencyInput").disabled) {
+    const value = $("concurrencyInput").value.trim();
+    const count = Number(value);
+    if (!value || !Number.isSafeInteger(count) || count < 1 || count > 8) {
+      $("settingsResult").textContent = "最大并发任务数须为 1–8 的整数。";
+      $("settingsResult").classList.add("error");
+      $("concurrencyInput").focus();
+      return;
+    }
+    settings.max_concurrency = count;
+  }
   settingsSaving = true;
   let settingsSaved = false;
   $("saveSettings").disabled = $("runAll").disabled = true;
   $("settingsResult").textContent = "正在保存…";
   $("settingsResult").classList.remove("error");
   try {
-    codex = await api("/api/codex/settings", {
-      model: $("modelInput").value.trim(),
-      reasoning_effort: $("effortSelect").value,
-      requirements: $("requirementsInput").value.trim(),
-    });
+    codex = await api("/api/codex/settings", settings);
     settingsSaved = true;
     if (runAll) {
-      $("settingsResult").textContent = "正在安排整册处理…";
+      $("settingsResult").textContent = "正在安排整册分析…";
       const result = await api("/api/codex/run-all", {});
-      const started = result.started || [],
-        skipped = result.skipped || [],
-        failed = result.failed || [];
-      $("settingsResult").textContent = [
-        `已安排 ${started.length} 张照片；跳过 ${skipped.length} 张；启动失败 ${failed.length} 张。`,
-        ...failed.map((item) => `${item.photoId || "照片"}：${item.error || "启动失败"}`),
-      ].join("\n");
-      $("settingsResult").classList.toggle("error", failed.length > 0);
-      toast(`已安排 ${started.length} 张照片处理`);
+      selectedAlbumJobId = result.jobId;
+      galleryScope = "planned";
+      runs = [result, ...runs.filter((item) => item.jobId !== result.jobId)];
+      renderAlbumPlan();
+      $("settingsResult").textContent = "整册任务已安排。主 AI 的处理方案和子任务进度会显示在相册上方。";
+      toast("已交给主 AI 处理");
       refresh();
     } else {
       $("settingsResult").textContent =
-        "已保存。本相册后续提交将使用这些要求和模型设置。";
+        settings.max_concurrency !== undefined
+          ? "已保存。并发数立即作用于等待队列；本相册后续任务将使用新的要求与模型设置。"
+          : "已保存。本相册后续任务将使用新的要求与模型设置。";
       toast("相册设置已保存");
     }
   } catch (error) {
@@ -1444,7 +2027,7 @@ async function saveAlbumSettings(runAll) {
   } finally {
     settingsSaving = false;
     $("saveSettings").disabled = false;
-    $("runAll").disabled = !$("requirementsInput").value.trim();
+    $("runAll").disabled = !$("requirementsInput").value.trim() || !items.length;
   }
 }
 $("settingsForm").onsubmit = (e) => {

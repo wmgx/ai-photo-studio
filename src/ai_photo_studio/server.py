@@ -55,7 +55,8 @@ def make_server(batch_path=None, port=0, library_path=None):
 
     def catalog(store, runner):
         return {'items': store.catalog(), 'project': store.project(), 'token': token,
-                'codex': runner.settings(), 'runs': runner.runs()}
+                'codex': runner.settings(), 'runs': runner.runs(),
+                'capabilities': {'trash': True, 'multiPoint': True}}
 
     def version_record(store, version_id):
         for photo in store.catalog():
@@ -176,6 +177,8 @@ def make_server(batch_path=None, port=0, library_path=None):
                     return self.json_response(catalog(store, runner))
                 if path == '/api/comments':
                     return self.json_response(store.comments())
+                if path == '/api/trash':
+                    return self.json_response(store.trash())
                 if path == '/api/codex/settings':
                     return self.json_response(runner.settings())
                 if path == '/api/codex/runs':
@@ -226,6 +229,10 @@ def make_server(batch_path=None, port=0, library_path=None):
                     item = store.select(body['photoId'], body.get('versionId'))
                 elif path == '/api/accept':
                     item = store.accept_version(body['photoId'], body['versionId'])
+                elif path == '/api/trash':
+                    item = runner.trash_item(body['photoId'], body.get('versionId'))
+                elif path == '/api/restore':
+                    item = store.restore_item(body['photoId'], body.get('versionId'))
                 elif path == '/api/codex/settings':
                     item = runner.configure(body)
                 elif path == '/api/codex/run-all':

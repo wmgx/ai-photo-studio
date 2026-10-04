@@ -29,6 +29,17 @@
         >
       </div>
       <p id="albumPath" class="album-path quiet" aria-live="polite"></p>
+      <section id="albumPlan" class="album-plan" aria-label="相册 AI 任务" hidden>
+        <div class="album-plan-heading">
+          <div>
+            <h2>主 AI 的处理方案</h2>
+            <p id="albumPlanStatus" class="quiet" role="status" aria-live="polite"></p>
+          </div>
+          <label for="albumPlanSelect">任务记录</label>
+          <select id="albumPlanSelect" aria-label="选择整册任务记录"></select>
+        </div>
+        <div id="albumPlanBody"></div>
+      </section>
       <div class="gallery-tools">
         <nav class="filters" id="filters" aria-label="照片分类">
           <button data-category="全部" aria-pressed="true">全部</button
@@ -38,6 +49,7 @@
         </nav>
         <button id="commentFilter" aria-pressed="false">有评论</button
         ><button id="pendingFilter" aria-pressed="false">待审阅</button
+        ><button id="openTrash" disabled>回收站</button
         ><button class="export-button" data-open-export disabled>
           导出已选 · 0</button
         ><input
@@ -47,6 +59,11 @@
           aria-label="搜索照片编号或场景"
           placeholder="搜索编号或场景"
         />
+      </div>
+      <div id="galleryScope" class="gallery-scope" aria-live="polite">
+        <span id="galleryScopeStatus"></span>
+        <button id="showPlanned" type="button">仅看主 AI 选片</button>
+        <button id="showAll" type="button">查看全部</button>
       </div>
       <div class="grid" id="grid" tabindex="0" aria-label="照片列表"></div>
       <p id="loadError" class="error" role="alert"></p>
@@ -62,7 +79,11 @@
         <div class="review-top">
           <button id="closeViewer" aria-label="返回相册">← 相册</button>
           <div class="review-heading">
-            <strong id="photoTitle"></strong><small id="photoMeta"></small>
+            <strong id="photoTitle"></strong>
+            <div class="review-detail">
+              <small id="photoMeta"></small>
+              <span id="photoJobStatus" class="job-status" role="status" aria-live="polite"></span>
+            </div>
           </div>
           <div class="top-spacer"></div>
           <button class="export-button" data-open-export disabled>
@@ -81,36 +102,28 @@
             ><button id="tripleMode" aria-pressed="true">多版本对比</button
             ><button id="compareMode" aria-pressed="false">滑动对比</button
             ><button id="originalMode" aria-pressed="false">原始构图</button
-            ><span id="revisionControls" class="revision-controls"
-              ><label for="revisionCount">最新修订数</label
-              ><input
-                id="revisionCount"
-                type="number"
-                min="1"
-                step="1"
-                value="2"
-                aria-describedby="revisionCountHint"
-              /><span id="revisionCountHint" class="quiet"></span></span
             ><button id="zoom" aria-pressed="false">放大 2×</button
-            ><button id="mark" aria-pressed="false">＋ 标记修改位置</button
+            ><button id="mark">＋ 放大标记修改位置</button
             ><a
               id="fullSize"
               target="_blank"
               rel="noopener"
               style="font-size: 12px; margin-left: 4px"
-              >全尺寸 ↗</a
+              >全屏查看</a
             ><span class="source-note" id="beforeNote"></span>
           </div>
           <div class="viewport" id="viewport">
             <div class="three-view" id="threeView"></div>
             <div id="picture" hidden class="picture-frame">
               <img id="afterImage" alt="修后成片" draggable="false" />
+              <div id="afterPins" class="pins"></div>
               <div class="before-layer" id="beforeLayer">
                 <img
                   id="beforeImage"
                   alt="修前完整原片，未裁切"
                   draggable="false"
                 />
+                <div id="beforePins" class="pins"></div>
               </div>
               <div class="divider" id="divider"></div>
               <span class="picture-label before-label" id="beforeLabel"
@@ -118,10 +131,10 @@
               ><span class="picture-label after-label" id="afterLabel"
                 >修后</span
               >
-              <div id="pin" class="pin" hidden></div>
             </div>
             <div class="original-frame" id="originalFrame" hidden>
               <img id="originalImage" alt="原始构图" />
+              <div id="originalPins" class="pins"></div>
             </div>
             <video
               class="video-view"
@@ -143,13 +156,20 @@
               hidden
             /><span id="splitBeforeLabel" hidden>对比版本</span
             ><span id="splitHint">拖动画面或滑杆</span
+            ><span id="markSummary" aria-live="polite"></span
             ><select id="sourceSelect" aria-label="选择对比版本"></select>
           </div>
         </section>
         <aside class="comment-panel">
           <div class="panel-section">
-            <h2>选定交付版本</h2>
-            <p>选择当前查看的版本，或取消选择。</p>
+            <h2>版本与交付</h2>
+            <p>上方“查看版本”可切换全部历史版本。通过表示确认审阅，交付版本需另行选择。</p>
+            <div class="version-actions">
+              <button type="button" id="acceptVersion">通过此版本</button>
+              <button type="button" id="deleteVersion">删除此版本</button>
+              <button type="button" id="deletePhoto">删除整张照片</button>
+            </div>
+            <p id="versionActionHint" class="quiet"></p>
             <div
               id="selectionChoices"
               class="selection-choices"
@@ -164,7 +184,7 @@
           </div>
           <div class="panel-section">
             <h2 id="commentFormTitle">这版想怎么改？</h2>
-            <p>可先标记画面位置，再写具体意见。</p>
+            <p>可先标记画面位置，再写具体意见。连续修改会结合这张照片的历史意见和修改记录。</p>
             <form id="commentForm">
               <textarea
                 id="commentText"
@@ -174,16 +194,13 @@
                 required
               ></textarea>
               <div class="location-row" id="locationRow" hidden>
-                <span id="locationText"></span
-                ><button type="button" id="clearPoint">清除标记</button>
+                <span id="locationText"></span>
+                <span id="pointList"></span>
+                <button type="button" id="clearPoint">清除全部标记</button>
               </div>
               <div class="comment-actions">
                 <button class="primary" type="submit" id="submitComment">
-                  保存并提交修改</button
-                ><button type="button" id="saveComment">仅保存评论</button
-                ><button type="button" id="acceptVersion" hidden>
-                  通过当前版本
-                </button>
+                  提交修改</button>
               </div>
               <div id="formStatus" role="status" aria-live="polite"></div>
               <div
@@ -205,6 +222,32 @@
           </details>
         </aside>
       </div>
+    </dialog>
+    <dialog id="imageLightbox" class="image-lightbox" aria-label="全屏查看照片">
+      <div class="lightbox-toolbar">
+        <strong id="lightboxTitle"></strong>
+        <span id="lightboxStatus" role="status" aria-live="polite"></span>
+        <button id="lightboxMinus" type="button" aria-label="缩小">−</button>
+        <button id="lightboxPlus" type="button" aria-label="放大">＋</button>
+        <span id="lightboxScale" aria-label="缩放比例">—</span>
+        <button id="lightboxActual" type="button">1:1</button>
+        <button id="lightboxFit" type="button">适合窗口</button>
+        <button id="lightboxMark" type="button" aria-pressed="false">标记修改位置</button>
+        <button id="lightboxUndoPoint" type="button" disabled>撤销上一处</button>
+        <button id="lightboxClearPoint" type="button" disabled>清除全部标记</button>
+        <button id="lightboxWrite" type="button" class="primary">写修改意见</button>
+        <button id="lightboxClose" type="button" aria-label="关闭全屏查看">关闭</button>
+      </div>
+      <div id="lightboxStage" class="lightbox-stage">
+        <img id="lightboxImage" alt="" draggable="false" />
+        <div id="lightboxPins" class="pins"></div>
+      </div>
+    </dialog>
+    <dialog id="trashDialog" class="trash-dialog" aria-label="相册回收站">
+      <div class="trash-heading"><h2>相册回收站</h2><button id="closeTrash" type="button">关闭</button></div>
+      <p class="quiet">删除的照片和修订版本可在这里恢复；原片和历史文件仍保留。</p>
+      <div id="trashList"></div>
+      <p id="trashStatus" role="status" aria-live="polite"></p>
     </dialog>
     <dialog id="exportDialog" class="export-dialog" aria-label="导出已选照片">
       <form id="exportForm">
@@ -265,7 +308,7 @@
     <dialog id="settingsDialog" class="settings-dialog" aria-label="相册设置">
       <form id="settingsForm">
         <h2>本相册的修图要求</h2>
-        <label for="requirementsInput">所有照片的共同要求</label
+        <label for="requirementsInput">相册统一要求</label
         ><textarea
           id="requirementsInput"
           maxlength="5000"
@@ -273,7 +316,7 @@
           aria-describedby="requirementsHint"
         ></textarea>
         <p class="quiet" id="requirementsHint">
-          保存后应用于这个目录中后续提交的每张照片；单张照片可在评论中补充具体要求。
+          这些要求交给主 AI 判断如何处理本相册。主 AI 会查看素材并安排具体子任务；单张意见可在评论中补充。
         </p>
         <h2>Codex 设置</h2>
         <p class="quiet">
@@ -298,6 +341,19 @@
           <option value="max">max</option>
           <option value="ultra">ultra</option>
         </select>
+        <label for="concurrencyInput">最大并发任务数</label
+        ><input
+          id="concurrencyInput"
+          type="number"
+          min="1"
+          max="8"
+          step="1"
+          value="1"
+          aria-describedby="concurrencyHint"
+        />
+        <p class="quiet" id="concurrencyHint">
+          本相册默认同时运行 1 个 AI 任务，可设为 1–8。调低后，已开始的任务会继续完成；等待中的任务按新上限启动。
+        </p>
         <div
           id="settingsResult"
           class="export-result"
@@ -310,11 +366,11 @@
             保存设置
           </button>
           <button type="button" id="runAll" disabled>
-            保存并处理全部照片
+            交给主 AI 处理
           </button>
         </div>
         <p class="quiet">
-          “保存并处理全部照片”会按当前要求逐张生成新版本；动态素材跳过。
+          “保存设置”不会启动处理；并发数立即作用于等待队列，要求与模型用于后续任务。主 AI 可安排选片、调色或仅给出建议；具体修图由子 AI 分别处理。视频修订暂不支持，动态素材仍可审阅和导出。
         </p>
       </form>
     </dialog>

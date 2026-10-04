@@ -53,7 +53,7 @@ def _parser():
     cadd.add_argument("--photo-id", required=True)
     cadd.add_argument("--version-id", required=True)
     cadd.add_argument("--text", required=True)
-    cadd.add_argument("--point", help='Normalized JSON object {"x":0.4,"y":0.5} on this version')
+    cadd.add_argument("--point", help='Normalized JSON point {"x":0.4,"y":0.5} or ordered point array on this version')
     cadd.add_argument("--submit", action="store_true")
     cadd.add_argument("--comment-id")
     csubmit = csub.add_parser("submit", help="Queue a saved comment for work")

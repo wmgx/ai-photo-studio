@@ -152,7 +152,7 @@ class Library:
             if not managed.exists():
                 init_batch(managed, name=directory.name)
             store = Store(managed)
-            imported = {photo["sources"][0] for photo in store.catalog()}
+            imported = {photo["sources"][0] for photo in store.catalog(include_deleted=True)}
             raw_by_stem = {}
             for path in directory.iterdir():
                 if path.is_file() and not path.is_symlink() and path.suffix.lower() in RAW_SUFFIXES:

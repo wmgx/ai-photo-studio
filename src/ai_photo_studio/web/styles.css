@@ -141,6 +141,19 @@ main {
   color: var(--text);
   width: 210px;
 }
+.gallery-scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: -8px 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.gallery-scope button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(245px, 1fr));
@@ -283,6 +296,12 @@ dialog::backdrop {
 .review-heading small {
   color: var(--muted);
 }
+.review-detail {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
 .top-spacer {
   flex: 1;
 }
@@ -312,24 +331,6 @@ dialog::backdrop {
 .view-tools button[aria-pressed="true"] {
   border-color: var(--accent);
   color: var(--accent);
-}
-.revision-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.revision-controls input {
-  width: 58px;
-  padding: 5px;
-  background: #23281f;
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-}
-.revision-controls .quiet {
-  font-size: 11px;
 }
 .source-note {
   color: var(--muted);
@@ -409,6 +410,12 @@ dialog::backdrop {
 .after-label {
   right: 13px;
 }
+.pins {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
 .pin {
   position: absolute;
   width: 25px;
@@ -419,6 +426,21 @@ dialog::backdrop {
   background: #e9b855b8;
   box-shadow: 0 0 0 5px #13171166;
   pointer-events: none;
+  display: grid;
+  place-items: center;
+  color: #171a12;
+  font: 700 13px/1 system-ui, sans-serif;
+}
+#pointList {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.location-row {
+  flex-wrap: wrap;
+}
+#markSummary {
+  color: var(--accent);
 }
 .mark-mode {
   cursor: crosshair;
@@ -531,6 +553,10 @@ textarea::placeholder {
   border-bottom: 1px solid var(--line);
   padding: 0 0 17px;
   margin-bottom: 17px;
+}
+.main-ai-comment {
+  border-left: 2px solid var(--accent);
+  padding-left: 12px;
 }
 .comment-item time {
   font-size: 10px;
@@ -773,6 +799,92 @@ input {
   height: 100%;
   object-fit: contain;
 }
+.version-media.enlargeable,
+.original-frame {
+  cursor: zoom-in;
+}
+.version-media.enlargeable:focus-visible,
+.original-frame:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.image-lightbox {
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: #0d0f0d;
+}
+.image-lightbox:not([open]) {
+  display: none;
+}
+.lightbox-toolbar {
+  min-height: 58px;
+  padding: 10px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  border-bottom: 1px solid var(--line);
+  background: #1b1e1a;
+}
+.lightbox-toolbar strong {
+  max-width: 32vw;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.lightbox-toolbar #lightboxStatus {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 12px;
+  flex-basis: 100%;
+  order: 1;
+  height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lightbox-toolbar #lightboxScale {
+  min-width: 45px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.lightbox-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+.lightbox-stage.is-dragging {
+  cursor: grabbing;
+}
+.lightbox-stage.mark-mode:not(.is-dragging) {
+  cursor: crosshair;
+}
+.lightbox-stage img {
+  max-width: none;
+  max-height: none;
+  pointer-events: none;
+  will-change: transform;
+}
+@media (max-width: 700px) {
+  .lightbox-toolbar {
+    flex-wrap: wrap;
+    justify-content: center;
+    padding: 8px;
+  }
+  .lightbox-toolbar strong {
+    max-width: 100%;
+  }
+  .lightbox-toolbar #lightboxStatus {
+    display: none;
+  }
+}
 .version-media p {
   color: var(--muted);
   text-align: center;
@@ -786,6 +898,43 @@ input {
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.version-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+#deleteVersion, #deletePhoto {
+  color: #e4aa9a;
+}
+.trash-dialog {
+  width: min(720px, calc(100vw - 32px));
+  height: auto;
+  max-height: calc(100vh - 40px);
+  margin: auto;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: auto;
+}
+.trash-heading, .trash-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.trash-heading h2 {
+  margin: 0;
+}
+.trash-item {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.trash-item strong {
+  overflow-wrap: anywhere;
+}
+.trash-item button {
+  flex-shrink: 0;
 }
 .selection-badge {
   position: absolute;
@@ -883,6 +1032,29 @@ input {
   color: var(--accent);
   font-size: 11px;
 }
+.job-status {
+  display: inline-block;
+  width: fit-content;
+  color: var(--muted);
+  font-size: 11px;
+}
+.photo-card > .job-status {
+  margin-top: 4px;
+}
+.job-queued {
+  color: var(--accent);
+}
+.job-running {
+  color: #9ec9dd;
+}
+.job-ready,
+.job-completed {
+  color: var(--green);
+}
+.job-needs_input,
+.job-failed {
+  color: #e5a492;
+}
 .album-tools {
   display: flex;
   align-items: center;
@@ -894,6 +1066,49 @@ input {
   margin: -8px 0 18px;
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+.album-plan {
+  margin: 0 0 22px;
+  padding: 15px 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #1c231b;
+}
+.album-plan[hidden] {
+  display: none;
+}
+.album-plan-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.album-plan-heading > div {
+  flex: 1;
+  min-width: 210px;
+}
+.album-plan h2,
+.album-plan h3,
+.album-plan p {
+  margin: 0;
+}
+.album-plan h2 {
+  font-size: 17px;
+}
+.album-plan-heading label {
+  color: var(--muted);
+  font-size: 12px;
+}
+.album-plan select {
+  max-width: min(340px, 90vw);
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #20251e;
+  color: var(--text);
+}
+#albumPlanBody > p {
+  margin-top: 10px;
 }
 .album-tools label {
   color: var(--muted);

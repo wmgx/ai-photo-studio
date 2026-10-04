@@ -1,4 +1,7 @@
 import csv
+import json
+import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +9,7 @@ from pathlib import Path
 from PIL import Image
 
 from ai_photo_studio.store import Store, init_batch
+from ai_photo_studio.executor import Runner
 
 
 class StoreTest(unittest.TestCase):
@@ -17,6 +21,23 @@ class StoreTest(unittest.TestCase):
         Image.new("RGB", (20, 12), "red").save(self.original)
         init_batch(self.root / "batch", preferences={"tone": "natural"})
         self.store = Store(self.root / "batch")
+
+    def test_comment_points_keep_order_in_work_materials(self):
+        photo = self.store.add_photo(self.original, "p1")
+        base = photo["currentVersionId"]
+        points = [{"x": 0.2, "y": 0.7}, {"x": 0.8, "y": 0.3}]
+        multiple = self.store.comment_add("p1", base, "1 帽檐；2 手指", points, submit=True)
+        single = self.store.comment_add("p1", base, "眼神", {"x": 0.5, "y": 0.5}, submit=True)
+        empty = self.store.comment_add("p1", base, "整体颜色", [], submit=True)
+        self.assertEqual(multiple["point"], points)
+        self.assertEqual(single["point"], {"x": 0.5, "y": 0.5})
+        self.assertIsNone(empty["point"])
+        work = self.store.start_work("p1")
+        saved = json.loads((Path(work["workDir"]) / "inputs.json").read_text(encoding="utf-8"))
+        self.assertEqual([item["point"] for item in saved["comments"]],
+                         [points, {"x": 0.5, "y": 0.5}, None])
+        with self.assertRaisesRegex(ValueError, "normalized"):
+            self.store.comment_add("p1", base, "无效", [{"x": 0.1, "y": 0.2}, {"x": True, "y": 0.3}])
 
     def test_version_comment_selection_and_export(self):
         self.assertEqual(self.store.project()["root"], str((self.root / "batch").resolve()))
@@ -77,6 +98,8 @@ class StoreTest(unittest.TestCase):
                                    operation_id="empty-summary")
         first = self.store.add_version("p1", base, candidate, "A", summary="调整色调", expected_current_id=base,
                                        operation_id="op-1")
+        with self.assertRaisesRegex(ValueError, "Current version changed since album analysis"):
+            self.store.start_work("p1", base, expected_current_id=base)
         retry = self.store.add_version("p1", base, candidate, "A", summary="调整色调", expected_current_id=base,
                                        operation_id="op-1")
         self.assertEqual(first["id"], retry["id"])
@@ -87,6 +110,73 @@ class StoreTest(unittest.TestCase):
             self.store.add_version("p1", base, candidate, "B", summary="调整色调", expected_current_id=base,
                                    operation_id="op-2")
         self.assertEqual(len(self.store.catalog()[0]["versions"]), 2)
+
+    def test_recycle_version_and_photo_preserves_files_and_restores_history(self):
+        # Opening an older album installs the small metadata table in place.
+        with sqlite3.connect(self.store.db_path) as db:
+            db.execute("DROP TABLE tombstones")
+        self.store = Store(self.root / "batch")
+        photo = self.store.add_photo(self.original, "p1")
+        original_id = photo["currentVersionId"]
+        candidate = self.root / "revision.jpg"
+        Image.new("RGB", (20, 12), "blue").save(candidate)
+        revision = self.store.add_version("p1", original_id, candidate, "秋色版", summary="调整秋色",
+                                          expected_current_id=original_id)
+        comment = self.store.comment_add("p1", revision["id"], "保留暖色")
+        self.store.select("p1", revision["id"])
+
+        self.store.trash_item("p1", revision["id"])
+        self.assertEqual(self.store.catalog()[0]["currentVersionId"], original_id)
+        self.assertEqual(self.store.catalog()[0]["selectedVersionId"], None)
+        self.assertEqual(len(self.store.catalog()[0]["versions"]), 1)
+        self.assertEqual(self.store.comments(), [])
+        self.assertTrue(Path(revision["path"]).is_file())
+        with self.assertRaisesRegex(ValueError, "回收站"):
+            self.store.select("p1", revision["id"])
+        with self.assertRaisesRegex(ValueError, "回收站"):
+            self.store.comment_submit(comment["id"])
+        with self.assertRaisesRegex(ValueError, "回收站"):
+            self.store.comment_reply(comment["id"], "旧版回复")
+        with self.assertRaisesRegex(ValueError, "原片版本"):
+            self.store.trash_item("p1", original_id)
+        with self.assertRaisesRegex(ValueError, "Select at least one"):
+            self.store.export()
+
+        self.store.restore_item("p1", revision["id"])
+        self.assertEqual(len(self.store.catalog()[0]["versions"]), 2)
+        self.assertEqual(self.store.catalog()[0]["currentVersionId"], original_id)
+        self.assertEqual(self.store.comments()[0]["id"], comment["id"])
+        self.store.select("p1", revision["id"])
+        self.store.trash_item("p1", revision["id"])
+        self.store.trash_item("p1")
+        self.assertEqual(self.store.catalog(), [])
+        self.assertEqual([entry["kind"] for entry in self.store.trash()], ["photo"])
+        with self.assertRaisesRegex(ValueError, "照片已移入回收站"):
+            self.store.restore_item("p1", revision["id"])
+        with self.assertRaisesRegex(ValueError, "回收站"):
+            self.store.start_work("p1")
+        self.store.restore_item("p1")
+        self.assertEqual(self.store.catalog()[0]["selectedVersionId"], None)
+        self.assertEqual(len(self.store.catalog()[0]["versions"]), 1)
+        self.store.restore_item("p1", revision["id"])
+        self.assertTrue(self.original.is_file())
+        self.assertTrue(Path(revision["path"]).is_file())
+
+    def test_recycle_refuses_photo_with_active_job(self):
+        photo = self.store.add_photo(self.original, "p1")
+        runner = Runner(self.store)
+        work_dir = self.store._managed(".review", "work", "queued-test")
+        work_dir.mkdir()
+        run = {"jobId": "queued-test", "photoId": "p1", "versionId": photo["currentVersionId"],
+               "status": "queued", "pid": os.getpid(), "startedAt": "2026-01-01", "workDir": str(work_dir)}
+        runner._save(run)
+        with self.assertRaisesRegex(ValueError, "待处理或正在处理"):
+            runner.trash_item("p1")
+        self.assertEqual(self.store.trash(), [])
+        run["status"] = "ready"
+        runner._save(run)
+        runner.trash_item("p1")
+        self.assertEqual(self.store.trash()[0]["photoId"], "p1")
 
 
 if __name__ == "__main__":
